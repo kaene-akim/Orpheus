@@ -1,5 +1,7 @@
 # Orpheus - NOTE: THIS IS IN TESTING PHASE. THERE ARE A LOT OF BUGS
 
+Orpheus is distributed under the [MIT License](LICENSE).
+
 Orpheus is a small, flat-styled local music player built with vanilla JavaScript
 and Vite. It reads the music on your computer, groups songs into albums and
 artists, and gives every collection its own queue. Music files are not bundled
