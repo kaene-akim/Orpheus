@@ -1,4 +1,5 @@
-# Orpheus - NOTE: THIS IS IN TESTING PHASE. THERE ARE A LOT OF BUGS
+# Orpheus Beta
+This is still unfinished for my standards but I don't really intend to go back to this for now. Still works really well for what it is
 
 Orpheus is distributed under the [MIT License](LICENSE).
 
