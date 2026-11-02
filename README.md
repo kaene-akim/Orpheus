@@ -203,8 +203,9 @@ The previous and next cover images beside the main artwork are also clickable.
 
 ### The queue
 
-The right-hand **Up next** panel is the current queue. Click any song to play it.
-The queue scrolls independently while the player stage stays fixed.
+The right-hand queue panel shows the active **Up next** queue, or the collection
+you are currently browsing. Click any song to play it. The queue scrolls
+independently while the player stage stays fixed.
 
 - **All Songs** is the full library queue.
 - Selecting a playlist, album, artist, or **Liked Songs** replaces the queue with

@@ -333,7 +333,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
           </div>
         </section>
 
-        <aside class="queue" aria-label="Up next">
+        <aside class="queue" aria-label="Queue">
           <div class="queue__header">
             <div class="queue__heading">
               <button
@@ -632,11 +632,28 @@ export function renderPlayer(root, { store, audio, artwork }) {
     return collection.name;
   }
 
+  // "Up next" is only accurate when the browsed queue is also the queue that
+  // is currently playing.
+  function isActiveQueue(state) {
+    const { activeCollection, playbackCollection } = state;
+    if (!activeCollection && !playbackCollection) return true;
+    if (!activeCollection || !playbackCollection) return false;
+    return (
+      activeCollection.type === playbackCollection.type &&
+      activeCollection.id === playbackCollection.id
+    );
+  }
+
   function updateQueueHeader() {
     const state = store.getState();
+    const activeQueue = isActiveQueue(state);
 
     elements.queueSource.textContent = collectionCaption(state.activeCollection);
-    elements.queueTitle.textContent = searchQuery ? 'Search results' : 'Up next';
+    elements.queueTitle.textContent = searchQuery
+      ? 'Search results'
+      : activeQueue
+        ? 'Up next'
+        : 'Browsing';
 
     if (searchQuery) {
       const { collectionMatches, otherMatches } = getSearchResults();
@@ -1079,7 +1096,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
     const collectionKey = state.activeCollection
       ? `${state.activeCollection.type}:${state.activeCollection.id}:${state.activeCollection.name}`
       : 'library';
-    const queueKey = `${collectionKey}|${state.displayedTracks
+    const activeQueueKey = isActiveQueue(state) ? 'active' : 'browsing';
+    const queueKey = `${collectionKey}|${activeQueueKey}|${state.displayedTracks
       .map((track) => track.id)
       .join(',')}`;
     if (queueKey !== renderedQueueKey) {
