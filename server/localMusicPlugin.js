@@ -219,7 +219,7 @@ export function createLocalMusicPlugin() {
         root,
         tracks: [],
         byId: new Map(),
-        error: `Music folder not found: ${root}`,
+        error: 'Music folder not found.',
         message: null,
       };
     }
@@ -229,7 +229,7 @@ export function createLocalMusicPlugin() {
         root,
         tracks: [],
         byId: new Map(),
-        error: `Music path is not a folder: ${root}`,
+        error: 'Music path is not a folder.',
         message: null,
       };
     }
@@ -241,7 +241,7 @@ export function createLocalMusicPlugin() {
         tracks: [],
         byId: new Map(),
         error: null,
-        message: `No audio files found in ${root}`,
+        message: 'No audio files found in the music folder.',
       };
     }
 
@@ -396,7 +396,6 @@ export function createLocalMusicPlugin() {
     if (pathname === '/api/library') {
       const library = await ensureLibrary();
       sendJson(res, 200, {
-        root: library.root,
         tracks: library.tracks,
         error: library.error,
         message: library.message,
@@ -445,6 +444,14 @@ export function createLocalMusicPlugin() {
         sendError(res, 403, 'Invalid media path.');
         return true;
       }
+
+      const library = await ensureLibrary();
+      const isLibraryAudio = [...library.byId.values()].includes(filePath);
+      if (!isLibraryAudio) {
+        sendError(res, 404, 'Audio file not found.');
+        return true;
+      }
+
       await streamAudio(req, res, filePath);
       return true;
     }
@@ -453,6 +460,20 @@ export function createLocalMusicPlugin() {
   }
 
   function middleware(req, res, next) {
+    const remoteAddress = req.socket.remoteAddress;
+    const isLoopback =
+      remoteAddress === '127.0.0.1' ||
+      remoteAddress === '::1' ||
+      remoteAddress === '::ffff:127.0.0.1';
+
+    if (
+      !isLoopback &&
+      ((req.url ?? '').startsWith('/api/') || (req.url ?? '').startsWith('/media/'))
+    ) {
+      sendError(res, 403, 'The local music API is only available on this device.');
+      return;
+    }
+
     handleRequest(req, res)
       .then((handled) => {
         if (!handled) next();
