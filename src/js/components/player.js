@@ -2,6 +2,12 @@ import { formatTime } from '../utils/formatTime.js';
 
 const DEFAULT_ART = '/assets/images/default-album-art.svg';
 
+const SIDEBAR_FILTERS = [
+  { id: 'playlists', label: 'Playlists' },
+  { id: 'artists', label: 'Artists' },
+  { id: 'albums', label: 'Albums' },
+];
+
 const ACCENT_COLORS = [
   '#b49cff',
   '#7ee0d3',
@@ -29,6 +35,9 @@ const icons = {
   heart: `<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z"/>`,
   playlist: `<path d="M3 6h11"/><path d="M3 12h11"/><path d="M3 18h7"/><path d="M17 11v8"/><path d="M13 15h8"/>`,
   close: `<path d="m6 6 12 12"/><path d="m18 6-12 12"/>`,
+  back: `<path d="m15 18-6-6 6-6"/>`,
+  album: `<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.6"/>`,
+  artist: `<circle cx="12" cy="8" r="3.4"/><path d="M5 20a7 7 0 0 1 14 0"/>`,
   settings: `<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>`,
 };
 
@@ -61,21 +70,28 @@ function trackHaystack(track) {
   return `${track.title} ${track.artist} ${track.album}`.toLowerCase();
 }
 
-export function renderPlayer(root, { store, audio }) {
+export function renderPlayer(root, { store, audio, artwork }) {
+  const art = artwork ?? {
+    urlFor: (track) => track?.artwork ?? DEFAULT_ART,
+    resolve: () => Promise.resolve(),
+    subscribe: () => () => {},
+  };
+
   root.innerHTML = `
     <section class="player" data-player aria-label="Orpheus music player">
       <div class="sidebar-backdrop" data-sidebar-backdrop></div>
 
-      <aside class="sidebar" id="playlists-sidebar" data-sidebar aria-hidden="true" aria-label="Playlists">
+      <aside class="sidebar" id="playlists-sidebar" data-sidebar aria-hidden="true" aria-label="Your library">
         <div class="sidebar__header">
           <div>
-            <p class="sidebar__eyebrow">Library</p>
-            <h2>Playlists</h2>
+            <p class="sidebar__eyebrow">Orpheus</p>
+            <h2>Your library</h2>
           </div>
-          <button class="sidebar__close" type="button" data-sidebar-close aria-label="Close playlists">
+          <button class="sidebar__close" type="button" data-sidebar-close aria-label="Close library">
             ${icon('close')}
           </button>
         </div>
+        <div class="sidebar__filters" role="tablist" aria-label="Library filter" data-sidebar-filters></div>
         <div class="sidebar__list" data-sidebar-list></div>
         <form class="sidebar__form" data-create-playlist-form>
           <input
@@ -318,9 +334,21 @@ export function renderPlayer(root, { store, audio }) {
 
         <aside class="queue" aria-label="Up next">
           <div class="queue__header">
-            <div>
-              <p class="queue__source" data-queue-source>All Songs</p>
-              <h2 data-queue-title>Up next</h2>
+            <div class="queue__heading">
+              <button
+                class="queue__back"
+                type="button"
+                data-queue-back
+                aria-label="Back to previous queue"
+                title="Back to previous queue"
+                hidden
+              >
+                ${icon('back')}
+              </button>
+              <div class="queue__heading-text">
+                <p class="queue__source" data-queue-source>All Songs</p>
+                <h2 data-queue-title>Up next</h2>
+              </div>
             </div>
             <span class="queue__count" data-count></span>
           </div>
@@ -354,6 +382,7 @@ export function renderPlayer(root, { store, audio }) {
     queue: root.querySelector('[data-queue]'),
     queueSource: root.querySelector('[data-queue-source]'),
     queueTitle: root.querySelector('[data-queue-title]'),
+    queueBack: root.querySelector('[data-queue-back]'),
     count: root.querySelector('[data-count]'),
     status: root.querySelector('[data-status]'),
     statusLabel: root.querySelector('[data-status-label]'),
@@ -373,6 +402,7 @@ export function renderPlayer(root, { store, audio }) {
     sidebarBackdrop: root.querySelector('[data-sidebar-backdrop]'),
     sidebarToggle: root.querySelector('[data-sidebar-toggle]'),
     sidebarClose: root.querySelector('[data-sidebar-close]'),
+    sidebarFilters: root.querySelector('[data-sidebar-filters]'),
     sidebarList: root.querySelector('[data-sidebar-list]'),
     sidebarCreateForm: root.querySelector('[data-create-playlist-form]'),
     sidebarCreateName: root.querySelector('[data-create-playlist-name]'),
@@ -383,31 +413,87 @@ export function renderPlayer(root, { store, audio }) {
   let appliedAccent = null;
   let searchQuery = '';
   let sidebarOpen = false;
+  let sidebarFilter = 'playlists';
   let queueItems = [];
   let renderedQueueKey = null;
   let renderedSidebarKey = null;
-  let liked = readLiked();
+  let trackLookup = new Map();
 
-  function readLiked() {
-    try {
-      const stored = JSON.parse(window.localStorage.getItem('orpheus:liked') ?? '[]');
-      return new Set(Array.isArray(stored) ? stored.filter((id) => typeof id === 'string') : []);
-    } catch {
-      return new Set();
-    }
+  const artObserver =
+    'IntersectionObserver' in window
+      ? new IntersectionObserver(
+          (entries) => {
+            entries.forEach((entry) => {
+              if (!entry.isIntersecting) return;
+              artObserver.unobserve(entry.target);
+              const track = trackLookup.get(entry.target.dataset.artTrack);
+              if (track) ensureArtwork(track);
+            });
+          },
+          { rootMargin: '300px' },
+        )
+      : null;
+
+  function artworkFor(track) {
+    return art.urlFor(track) ?? DEFAULT_ART;
   }
 
-  function persistLiked() {
-    try {
-      window.localStorage.setItem('orpheus:liked', JSON.stringify([...liked]));
-    } catch {
-      // Ignore storage failures; likes still work for this session.
+  function setImage(image, src, alt) {
+    if (!image) return;
+    if (image.getAttribute('src') !== src) image.src = src;
+    if (typeof alt === 'string' && image.alt !== alt) image.alt = alt;
+  }
+
+  function ensureArtwork(track) {
+    if (track && !track.artwork) art.resolve(track);
+  }
+
+  function observeArtwork(container) {
+    if (!container) return;
+    container.querySelectorAll('img[data-art-track]').forEach((image) => {
+      if (image.dataset.artObserved === '1') return;
+      image.dataset.artObserved = '1';
+
+      const track = trackLookup.get(image.dataset.artTrack);
+      if (!track) return;
+      if (artworkFor(track) !== DEFAULT_ART) return;
+
+      if (artObserver) {
+        artObserver.observe(image);
+      } else {
+        ensureArtwork(track);
+      }
+    });
+  }
+
+  function refreshArtwork(track) {
+    if (!track) return;
+    const state = store.getState();
+
+    if (state.currentTrack?.id === track.id) {
+      setImage(elements.artwork, artworkFor(track), `${track.album} — album artwork`);
     }
+
+    if (state.tracks.length > 1) {
+      const prevTrack = state.tracks[(state.currentIndex - 1 + state.tracks.length) % state.tracks.length];
+      const nextTrack = state.tracks[(state.currentIndex + 1) % state.tracks.length];
+      if (prevTrack?.id === track.id) {
+        setImage(elements.prevArtwork, artworkFor(track), `${track.album} — previous track artwork`);
+      }
+      if (nextTrack?.id === track.id) {
+        setImage(elements.nextArtwork, artworkFor(track), `${track.album} — next track artwork`);
+      }
+    }
+
+    root.querySelectorAll('img[data-art-track]').forEach((image) => {
+      if (image.dataset.artTrack === track.id) setImage(image, artworkFor(track), '');
+    });
   }
 
   function syncLike() {
-    const track = store.getState().currentTrack;
-    const isLiked = Boolean(track && liked.has(track.id));
+    const state = store.getState();
+    const track = state.currentTrack;
+    const isLiked = Boolean(track && state.likedIds.includes(track.id));
     elements.like.classList.toggle('is-active', isLiked);
     elements.like.setAttribute('aria-pressed', String(isLiked));
     elements.like.setAttribute('aria-label', isLiked ? 'Unlike this song' : 'Like this song');
@@ -437,34 +523,38 @@ export function renderPlayer(root, { store, audio }) {
 
   function setSidebarOpen(open) {
     sidebarOpen = open;
-    if (open) positionSidebar();
+    if (open) {
+      const activeType = store.getState().activeCollection?.type;
+      if (activeType === 'album') sidebarFilter = 'albums';
+      else if (activeType === 'artist') sidebarFilter = 'artists';
+      else if (activeType === 'playlist' || activeType === 'liked') sidebarFilter = 'playlists';
+      positionSidebar();
+      renderSidebar();
+    }
     elements.sidebar.classList.toggle('is-open', open);
     elements.sidebarBackdrop.classList.toggle('is-open', open);
     elements.sidebar.setAttribute('aria-hidden', String(!open));
     elements.sidebarToggle.setAttribute('aria-expanded', String(open));
-    if (open) renderSidebar();
   }
 
   function getSearchResults() {
     const state = store.getState();
     const needle = searchQuery.toLowerCase();
-    const inPlaylist = Boolean(state.activePlaylistId);
-    const playlist = inPlaylist
-      ? state.playlists.find((item) => item.id === state.activePlaylistId)
-      : null;
+    const collection = state.activeCollection;
     const matches = (track) => trackHaystack(track).includes(needle);
-    const playlistMatches = inPlaylist ? state.tracks.filter(matches) : [];
+    const collectionMatches = collection ? state.tracks.filter(matches) : [];
     const queuedIds = new Set(state.tracks.map((track) => track.id));
     // On the library queue every song is already in the active queue, so list
     // the library itself instead of excluding everything as "other songs".
-    const otherMatches = inPlaylist
+    const otherMatches = collection
       ? state.library.filter((track) => !queuedIds.has(track.id) && matches(track))
       : state.library.filter(matches);
 
     return {
-      inPlaylist,
-      playlistName: playlist?.name ?? '',
-      playlistMatches,
+      inCollection: Boolean(collection),
+      collection,
+      collectionName: collection?.name ?? 'All Songs',
+      collectionMatches,
       otherMatches,
     };
   }
@@ -481,7 +571,12 @@ export function renderPlayer(root, { store, audio }) {
           ${active ? 'aria-current="true"' : ''}
         >
           <span class="queue__art">
-            <img src="${escapeHtml(track.artwork)}" alt="" loading="lazy" />
+            <img
+              src="${escapeHtml(artworkFor(track))}"
+              alt=""
+              loading="lazy"
+              data-art-track="${escapeHtml(track.id)}"
+            />
             <span class="queue__duration">${track.duration ? formatTime(track.duration) : ''}</span>
             <span class="queue__equalizer" aria-hidden="true"><i></i><i></i><i></i></span>
           </span>
@@ -516,18 +611,22 @@ export function renderPlayer(root, { store, audio }) {
     });
   }
 
+  function collectionCaption(collection) {
+    if (!collection) return 'All Songs';
+    if (collection.type === 'album') return `Album · ${collection.name}`;
+    if (collection.type === 'artist') return `Artist · ${collection.name}`;
+    return collection.name;
+  }
+
   function updateQueueHeader() {
     const state = store.getState();
-    const activePlaylist = state.activePlaylistId
-      ? state.playlists.find((item) => item.id === state.activePlaylistId)
-      : null;
 
-    elements.queueSource.textContent = activePlaylist?.name ?? 'All Songs';
+    elements.queueSource.textContent = collectionCaption(state.activeCollection);
     elements.queueTitle.textContent = searchQuery ? 'Search results' : 'Up next';
 
     if (searchQuery) {
-      const { playlistMatches, otherMatches } = getSearchResults();
-      const total = playlistMatches.length + otherMatches.length;
+      const { collectionMatches, otherMatches } = getSearchResults();
+      const total = collectionMatches.length + otherMatches.length;
       elements.count.textContent = `${total} ${total === 1 ? 'result' : 'results'}`;
       return;
     }
@@ -541,14 +640,23 @@ export function renderPlayer(root, { store, audio }) {
     let html = '';
 
     if (searchQuery) {
-      const { inPlaylist, playlistName, playlistMatches, otherMatches } = getSearchResults();
-      const total = playlistMatches.length + otherMatches.length;
+      const { inCollection, collection, collectionName, collectionMatches, otherMatches } =
+        getSearchResults();
+      const total = collectionMatches.length + otherMatches.length;
 
-      if (inPlaylist) {
-        html += sectionRow(playlistName || 'Playlist');
-        html += playlistMatches.length
-          ? playlistMatches.map(trackRow).join('')
-          : noResultRow('No song found in this playlist.');
+      if (inCollection) {
+        const emptyLabel =
+          collection?.type === 'playlist'
+            ? 'this playlist'
+            : collection?.type === 'album'
+              ? 'this album'
+              : collection?.type === 'liked'
+                ? 'Liked Songs'
+                : 'this artist';
+        html += sectionRow(collectionName || 'This collection');
+        html += collectionMatches.length
+          ? collectionMatches.map(trackRow).join('')
+          : noResultRow(`No song found in ${emptyLabel}.`);
       }
 
       html += sectionRow('All Songs');
@@ -563,48 +671,169 @@ export function renderPlayer(root, { store, audio }) {
       `;
     } else if (state.tracks.length) {
       html = state.tracks.map(trackRow).join('');
+    } else if (state.libraryError) {
+      html = noResultRow(state.libraryError);
+    } else if (state.libraryMessage) {
+      html = noResultRow(state.libraryMessage);
     } else {
-      html = noResultRow(
-        state.activePlaylistId
-          ? 'This playlist is empty. Add songs with the playlist button below.'
-          : 'No songs in your library yet.',
-      );
+      const emptyLabel = state.activeCollection
+        ? state.activeCollection.type === 'liked'
+          ? 'No liked songs yet. Tap the heart on a song to add it here.'
+          : state.activeCollection.type === 'album'
+            ? 'This album is empty.'
+            : state.activeCollection.type === 'artist'
+              ? 'This artist has no songs.'
+              : 'This playlist is empty. Add songs with the playlist button below.'
+        : 'No songs in your library yet.';
+      html = noResultRow(emptyLabel);
     }
 
     elements.queue.innerHTML = html;
     queueItems = [...elements.queue.querySelectorAll('.queue__item')];
     syncQueueActive();
     updateQueueHeader();
+    observeArtwork(elements.queue);
   }
 
   function renderSidebar() {
     const state = store.getState();
-    const activeId = state.activePlaylistId ?? '';
-    const items = [
-      { id: '', name: 'All Songs', count: state.library.length, icon: 'note' },
-      ...state.playlists.map((playlist) => ({
-        id: playlist.id,
-        name: playlist.name,
-        count: playlist.trackIds.length,
-        icon: 'playlist',
-      })),
-    ];
+    const active = state.activeCollection;
 
-    elements.sidebarList.innerHTML = items
-      .map(
-        (item) => `
-          <button
-            class="sidebar__item${item.id === activeId ? ' is-active' : ''}"
-            type="button"
-            data-playlist-id="${escapeHtml(item.id)}"
-          >
-            <span class="sidebar__item-icon">${icon(item.icon)}</span>
-            <span class="sidebar__item-name">${escapeHtml(item.name)}</span>
-            <span class="sidebar__item-count">${item.count}</span>
-          </button>
-        `,
-      )
-      .join('');
+    elements.sidebarFilters.innerHTML = SIDEBAR_FILTERS.map(
+      (filter) => `
+        <button
+          class="sidebar__filter${sidebarFilter === filter.id ? ' is-active' : ''}"
+          type="button"
+          role="tab"
+          aria-selected="${sidebarFilter === filter.id}"
+          data-sidebar-filter="${filter.id}"
+        >${filter.label}</button>
+      `,
+    ).join('');
+
+    elements.sidebarCreateForm.hidden = sidebarFilter !== 'playlists';
+
+    const trackFor = (trackIds) => {
+      const id = trackIds?.[0];
+      return id ? state.library.find((track) => track.id === id) ?? null : null;
+    };
+
+    const item = ({ type, id, name, subtitle, count, track, iconName = 'note', round = false }) => {
+      const isActive =
+        type === 'library'
+          ? !active
+          : active?.type === type && active.id === id;
+      const thumb = track
+        ? `<img
+            src="${escapeHtml(artworkFor(track))}"
+            alt=""
+            loading="lazy"
+            data-art-track="${escapeHtml(track.id)}"
+          />`
+        : icon(iconName);
+
+      return `
+        <button
+          class="sidebar__item${isActive ? ' is-active' : ''}"
+          type="button"
+          data-collection-type="${escapeHtml(type)}"
+          data-collection-id="${escapeHtml(id)}"
+          ${isActive ? 'aria-current="true"' : ''}
+        >
+          <span class="sidebar__item-art${round ? ' sidebar__item-art--round' : ''}">${thumb}</span>
+          <span class="sidebar__item-meta">
+            <span class="sidebar__item-name">${escapeHtml(name)}</span>
+            <span class="sidebar__item-sub">${escapeHtml(subtitle)}</span>
+          </span>
+          <span class="sidebar__item-count">${count}</span>
+        </button>
+      `;
+    };
+
+    let html = '';
+
+    if (sidebarFilter === 'playlists') {
+      const likedTracks = state.library.filter((track) => state.likedIds.includes(track.id));
+
+      html += item({
+        type: 'library',
+        id: '',
+        name: 'All Songs',
+        subtitle: 'Your whole library',
+        count: state.library.length,
+        iconName: 'note',
+      });
+
+      html += item({
+        type: 'liked',
+        id: 'liked',
+        name: 'Liked Songs',
+        subtitle: `Liked · ${likedTracks.length} ${
+          likedTracks.length === 1 ? 'song' : 'songs'
+        }`,
+        count: likedTracks.length,
+        track: likedTracks[0] ?? null,
+        iconName: 'heart',
+      });
+
+      if (state.playlists.length) {
+        html += state.playlists
+          .map((playlist) =>
+            item({
+              type: 'playlist',
+              id: playlist.id,
+              name: playlist.name,
+              subtitle: `Playlist · ${playlist.trackIds.length} ${
+                playlist.trackIds.length === 1 ? 'song' : 'songs'
+              }`,
+              count: playlist.trackIds.length,
+              track: trackFor(playlist.trackIds),
+              iconName: 'playlist',
+            }),
+          )
+          .join('');
+      } else {
+        html += '<p class="sidebar__empty">No playlists yet. Create one below.</p>';
+      }
+    } else if (sidebarFilter === 'artists') {
+      html += state.artists.length
+        ? state.artists
+            .map((artist) =>
+              item({
+                type: 'artist',
+                id: artist.id,
+                name: artist.name,
+                subtitle: `Artist · ${artist.trackIds.length} ${
+                  artist.trackIds.length === 1 ? 'song' : 'songs'
+                }`,
+                count: artist.trackIds.length,
+                track: trackFor(artist.trackIds),
+                iconName: 'artist',
+                round: true,
+              }),
+            )
+            .join('')
+        : '<p class="sidebar__empty">No artists in your library yet.</p>';
+    } else {
+      html += state.albums.length
+        ? state.albums
+            .map((album) =>
+              item({
+                type: 'album',
+                id: album.id,
+                name: album.name,
+                subtitle: `Album · ${album.artist}`,
+                count: album.trackIds.length,
+                track: trackFor(album.trackIds),
+                iconName: 'album',
+              }),
+            )
+            .join('')
+        : '<p class="sidebar__empty">No albums in your library yet.</p>';
+    }
+
+    elements.sidebarList.innerHTML = html;
+    observeArtwork(elements.sidebarList);
   }
 
   function renderPlaylistMenu() {
@@ -662,17 +891,17 @@ export function renderPlayer(root, { store, audio }) {
       return;
     }
 
-    // The result came from "All Songs" while a playlist was playing.
+    // The result came from "All Songs" while a playlist, album, or artist was playing.
     index = state.library.findIndex((track) => track.id === trackId);
     if (index === -1) return;
-    store.setQueue(state.library, { activePlaylistId: null, selectedTrackId: trackId });
+    store.setQueue(state.library, { activeCollection: null, selectedTrackId: trackId });
     audio.play();
   }
 
   function playFirstResult() {
     if (!searchQuery) return;
-    const { playlistMatches, otherMatches } = getSearchResults();
-    const track = playlistMatches[0] ?? otherMatches[0];
+    const { collectionMatches, otherMatches } = getSearchResults();
+    const track = collectionMatches[0] ?? otherMatches[0];
     if (!track) return;
     playTrack(track.id);
   }
@@ -691,7 +920,12 @@ export function renderPlayer(root, { store, audio }) {
       repeat,
       accent,
       error,
+      canGoBack,
     } = state;
+
+    trackLookup = new Map();
+    state.library.forEach((track) => trackLookup.set(track.id, track));
+    state.tracks.forEach((track) => trackLookup.set(track.id, track));
 
     if (accent !== appliedAccent) {
       document.documentElement.style.setProperty('--accent', accent);
@@ -705,19 +939,14 @@ export function renderPlayer(root, { store, audio }) {
     });
 
     if (currentTrack) {
-      if (elements.artwork.getAttribute('src') !== currentTrack.artwork) {
-        elements.artwork.src = currentTrack.artwork;
-        elements.artwork.alt = `${currentTrack.album} — album artwork`;
-      }
+      setImage(elements.artwork, artworkFor(currentTrack), `${currentTrack.album} — album artwork`);
+      ensureArtwork(currentTrack);
       elements.album.textContent = currentTrack.album;
       elements.title.textContent = currentTrack.title;
       elements.artist.textContent = currentTrack.artist;
       document.title = `${currentTrack.title} — ${currentTrack.artist} · Orpheus`;
     } else {
-      if (elements.artwork.getAttribute('src') !== DEFAULT_ART) {
-        elements.artwork.src = DEFAULT_ART;
-        elements.artwork.alt = '';
-      }
+      setImage(elements.artwork, DEFAULT_ART, '');
       elements.album.textContent = '';
       elements.title.textContent = 'No track selected';
       elements.artist.textContent = '';
@@ -732,14 +961,18 @@ export function renderPlayer(root, { store, audio }) {
       const prevTrack = tracks[(currentIndex - 1 + tracks.length) % tracks.length];
       const nextTrack = tracks[(currentIndex + 1) % tracks.length];
 
-      if (elements.prevArtwork.getAttribute('src') !== prevTrack.artwork) {
-        elements.prevArtwork.src = prevTrack.artwork;
-        elements.prevArtwork.alt = `${prevTrack.album} — previous track artwork`;
-      }
-      if (elements.nextArtwork.getAttribute('src') !== nextTrack.artwork) {
-        elements.nextArtwork.src = nextTrack.artwork;
-        elements.nextArtwork.alt = `${nextTrack.album} — next track artwork`;
-      }
+      setImage(
+        elements.prevArtwork,
+        artworkFor(prevTrack),
+        `${prevTrack.album} — previous track artwork`,
+      );
+      setImage(
+        elements.nextArtwork,
+        artworkFor(nextTrack),
+        `${nextTrack.album} — next track artwork`,
+      );
+      ensureArtwork(prevTrack);
+      ensureArtwork(nextTrack);
 
       elements.prevCover.setAttribute('aria-label', `Play previous track: ${prevTrack.title}`);
       elements.nextCover.setAttribute('aria-label', `Play next track: ${nextTrack.title}`);
@@ -782,7 +1015,10 @@ export function renderPlayer(root, { store, audio }) {
     setRangeFill(elements.volume, volume * 100);
     elements.volumeLabel.textContent = muted ? 'Muted' : `${Math.round(volume * 100)}%`;
 
-    const queueKey = `${state.activePlaylistId ?? ''}|${tracks.map((track) => track.id).join(',')}`;
+    const collectionKey = state.activeCollection
+      ? `${state.activeCollection.type}:${state.activeCollection.id}`
+      : 'library';
+    const queueKey = `${collectionKey}|${tracks.map((track) => track.id).join(',')}`;
     if (queueKey !== renderedQueueKey) {
       renderedQueueKey = queueKey;
       renderQueue();
@@ -790,9 +1026,13 @@ export function renderPlayer(root, { store, audio }) {
       syncQueueActive();
     }
 
-    const sidebarKey = `${state.activePlaylistId ?? ''}|${state.playlists
+    elements.queueBack.hidden = !canGoBack;
+
+    const sidebarKey = `${sidebarFilter}|${collectionKey}|${state.playlists
       .map((playlist) => `${playlist.id}:${playlist.trackIds.join(',')}`)
-      .join('|')}|${state.library.length}`;
+      .join('|')}|${state.albums.map((album) => album.id).join(',')}|${state.artists
+      .map((artist) => artist.id)
+      .join(',')}|${state.likedIds.join(',')}|${state.library.length}`;
     if (sidebarKey !== renderedSidebarKey) {
       renderedSidebarKey = sidebarKey;
       if (sidebarOpen) renderSidebar();
@@ -810,6 +1050,12 @@ export function renderPlayer(root, { store, audio }) {
   elements.next.addEventListener('click', () => audio.next());
   elements.prevCover.addEventListener('click', () => audio.previous());
   elements.nextCover.addEventListener('click', () => audio.next());
+
+  // Dragging artwork creates a ghost image that follows the pointer on some
+  // browsers. Artwork is decorative, so never start a native drag.
+  player.addEventListener('dragstart', (event) => {
+    if (event.target instanceof HTMLImageElement) event.preventDefault();
+  });
   elements.shuffle.addEventListener('click', () => store.toggleShuffle());
   elements.repeat.addEventListener('click', () => store.cycleRepeat());
   elements.mute.addEventListener('click', () => store.toggleMute());
@@ -818,14 +1064,7 @@ export function renderPlayer(root, { store, audio }) {
   elements.like.addEventListener('click', () => {
     const track = store.getState().currentTrack;
     if (!track) return;
-
-    if (liked.has(track.id)) {
-      liked.delete(track.id);
-    } else {
-      liked.add(track.id);
-    }
-    persistLiked();
-    syncLike();
+    store.toggleLike(track.id);
   });
 
   elements.settingsToggle.addEventListener('click', () => {
@@ -849,16 +1088,32 @@ export function renderPlayer(root, { store, audio }) {
 
   elements.sidebarBackdrop.addEventListener('click', () => setSidebarOpen(false));
 
+  elements.sidebarFilters.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-sidebar-filter]');
+    if (!button) return;
+    sidebarFilter = button.dataset.sidebarFilter;
+    renderSidebar();
+  });
+
   elements.sidebarList.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-playlist-id]');
+    const button = event.target.closest('[data-collection-type]');
     if (!button) return;
 
     setSidebarOpen(false);
     clearSearch();
 
-    const playlistId = button.dataset.playlistId || null;
-    const hasTracks = playlistId ? store.selectPlaylist(playlistId) : store.selectLibrary();
-    if (hasTracks) audio.play();
+    const type = button.dataset.collectionType;
+    const collectionId = button.dataset.collectionId || null;
+
+    // Browsing a collection only swaps the visible queue. It must never start
+    // playback on its own; the user presses play when they want sound.
+    audio.pause();
+
+    if (type === 'playlist') store.selectPlaylist(collectionId);
+    else if (type === 'album') store.selectAlbum(collectionId);
+    else if (type === 'artist') store.selectArtist(collectionId);
+    else if (type === 'liked') store.selectLiked();
+    else store.selectLibrary();
   });
 
   elements.sidebarCreateForm.addEventListener('submit', (event) => {
@@ -946,6 +1201,12 @@ export function renderPlayer(root, { store, audio }) {
     }
 
     playTrack(trackId);
+  });
+
+  elements.queueBack.addEventListener('click', () => {
+    audio.pause();
+    clearSearch();
+    store.goBackQueue();
   });
 
   function seekBy(seconds) {
@@ -1062,9 +1323,12 @@ export function renderPlayer(root, { store, audio }) {
   window.addEventListener('resize', handleResize);
 
   const unsubscribe = store.subscribe(update);
+  const unsubscribeArtwork = art.subscribe((track) => refreshArtwork(track));
 
   return () => {
     unsubscribe();
+    unsubscribeArtwork();
+    if (artObserver) artObserver.disconnect();
     document.removeEventListener('keydown', handleKeydown);
     document.removeEventListener('click', handleDocumentClick);
     window.removeEventListener('pointerup', handlePointerUp);

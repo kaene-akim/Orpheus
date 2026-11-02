@@ -1,4 +1,21 @@
-export function createAudioService(store) {
+const DEFAULT_ARTWORK = '/assets/images/default-album-art.svg';
+
+const MIME_BY_EXTENSION = {
+  avif: 'image/avif',
+  gif: 'image/gif',
+  jpeg: 'image/jpeg',
+  jpg: 'image/jpeg',
+  png: 'image/png',
+  svg: 'image/svg+xml',
+  webp: 'image/webp',
+};
+
+function mimeFromUrl(url = '') {
+  const match = String(url).split('?')[0].match(/\.([a-z0-9]+)$/i);
+  return MIME_BY_EXTENSION[match?.[1]?.toLowerCase()] ?? 'image/jpeg';
+}
+
+export function createAudioService(store, { artwork = null } = {}) {
   const audio = new Audio();
   audio.preload = 'metadata';
 
@@ -25,15 +42,20 @@ export function createAudioService(store) {
       return;
     }
 
+    const info = artwork?.describe(track) ?? {
+      url: track.artwork ?? DEFAULT_ARTWORK,
+      type: mimeFromUrl(track.artwork ?? DEFAULT_ARTWORK),
+    };
+
     navigator.mediaSession.metadata = new MediaMetadata({
       title: track.title,
       artist: track.artist,
       album: track.album,
       artwork: [
         {
-          src: new URL(track.artwork, window.location.href).href,
+          src: new URL(info.url, window.location.href).href,
           sizes: '512x512',
-          type: 'image/svg+xml',
+          type: info.type,
         },
       ],
     });
@@ -52,6 +74,15 @@ export function createAudioService(store) {
       audio.volume = effectiveVolume;
     }
   });
+
+  // Embedded artwork is read asynchronously, so refresh OS media controls when
+  // the cover for the current track becomes available.
+  if (artwork?.subscribe) {
+    artwork.subscribe((track) => {
+      const current = store.getState().currentTrack;
+      if (current && track?.id === current.id) updateMediaSession(current);
+    });
+  }
 
   function play() {
     if (!store.getState().currentTrack) return Promise.resolve();

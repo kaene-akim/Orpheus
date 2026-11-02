@@ -10,5 +10,8 @@
   },
   "devDependencies": {
     "vite": "latest"
+  },
+  "dependencies": {
+    "music-metadata": "^12.3.4"
   }
 }

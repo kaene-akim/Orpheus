@@ -67,18 +67,114 @@ function readPlaylists(storageKey) {
   }
 }
 
+function encodeIdPart(value) {
+  return encodeURIComponent(String(value ?? ''));
+}
+
+function readLiked(likedKey) {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(likedKey) ?? '[]');
+    if (!Array.isArray(stored)) return [];
+    return [...new Set(stored.filter((id) => typeof id === 'string'))];
+  } catch {
+    return [];
+  }
+}
+
+function sameCollection(left, right) {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return left.type === right.type && left.id === right.id;
+}
+
+const QUEUE_HISTORY_LIMIT = 25;
+
+// The same album title can exist for different artists, so key albums by both.
+function buildCollections(library) {
+  const albums = new Map();
+  const artists = new Map();
+
+  library.forEach((track) => {
+    if (!track || typeof track.id !== 'string') return;
+
+    const artistName = track.artist || 'Unknown artist';
+    const albumArtistName = track.albumArtist || artistName;
+    const albumName = track.album || 'Unknown album';
+
+    let artist = artists.get(artistName);
+    if (!artist) {
+      artist = {
+        id: `artist:${encodeIdPart(artistName)}`,
+        type: 'artist',
+        name: artistName,
+        trackIds: [],
+        trackId: track.id,
+        artwork: track.artwork ?? null,
+      };
+      artists.set(artistName, artist);
+    }
+    artist.trackIds.push(track.id);
+    if (!artist.artwork && track.artwork) artist.artwork = track.artwork;
+
+    const albumKey = `${albumArtistName}\u0000${albumName}`;
+    let album = albums.get(albumKey);
+    if (!album) {
+      album = {
+        id: `album:${encodeIdPart(albumArtistName)}:${encodeIdPart(albumName)}`,
+        type: 'album',
+        name: albumName,
+        artist: albumArtistName,
+        trackIds: [],
+        trackId: track.id,
+        artwork: track.artwork ?? null,
+      };
+      albums.set(albumKey, album);
+    }
+    album.trackIds.push(track.id);
+    if (!album.artwork && track.artwork) album.artwork = track.artwork;
+  });
+
+  return { albums: [...albums.values()], artists: [...artists.values()] };
+}
+
+function descriptorOf(collection) {
+  if (!collection) return null;
+  return {
+    type: collection.type,
+    id: collection.id,
+    name: collection.name,
+    ...(collection.artist ? { artist: collection.artist } : {}),
+  };
+}
+
 export function createPlayerStore(
   initialTracks = [],
-  { storageKey = 'orpheus:player-prefs', playlistsKey = 'orpheus:playlists' } = {},
+  {
+    storageKey = 'orpheus:player-prefs',
+    playlistsKey = 'orpheus:playlists',
+    likedKey = 'orpheus:liked',
+    libraryRoot = null,
+    libraryError = null,
+    libraryMessage = null,
+  } = {},
 ) {
   const library = [...initialTracks];
   const prefs = readPrefs(storageKey);
+  const { albums, artists } = buildCollections(library);
 
   let state = {
     tracks: [...library],
     library,
+    libraryRoot,
+    libraryError,
+    libraryMessage,
     playlists: readPlaylists(playlistsKey),
-    activePlaylistId: null,
+    albums,
+    artists,
+    likedIds: readLiked(likedKey),
+    // `activeCollection` is null for the full library ("All Songs").
+    activeCollection: null,
+    queueHistory: [],
     currentIndex: 0,
     isPlaying: false,
     currentTime: 0,
@@ -90,7 +186,13 @@ export function createPlayerStore(
   const listeners = new Set();
 
   function getState() {
-    return { ...state, currentTrack: state.tracks[state.currentIndex] ?? null };
+    return {
+      ...state,
+      activePlaylistId:
+        state.activeCollection?.type === 'playlist' ? state.activeCollection.id : null,
+      canGoBack: state.queueHistory.length > 0,
+      currentTrack: state.tracks[state.currentIndex] ?? null,
+    };
   }
 
   function persistPrefs() {
@@ -110,6 +212,14 @@ export function createPlayerStore(
     }
   }
 
+  function persistLiked() {
+    try {
+      window.localStorage.setItem(likedKey, JSON.stringify(state.likedIds));
+    } catch {
+      // Ignore storage failures; likes still work for this session.
+    }
+  }
+
   function setState(patch) {
     state = { ...state, ...patch };
     if (['volume', 'muted', 'shuffle', 'repeat', 'accent'].some((key) => key in patch)) {
@@ -117,6 +227,9 @@ export function createPlayerStore(
     }
     if ('playlists' in patch) {
       persistPlaylists();
+    }
+    if ('likedIds' in patch) {
+      persistLiked();
     }
     const snapshot = getState();
     listeners.forEach((listener) => listener(snapshot));
@@ -169,8 +282,45 @@ export function createPlayerStore(
     return playlist.trackIds.map((id) => byId.get(id)).filter(Boolean);
   }
 
-  function activateQueue(nextTracks, activePlaylistId, preferredTrackId = null) {
+  function collectionTracks(collection) {
+    if (!collection) return [...library];
+    const byId = new Map(library.map((track) => [track.id, track]));
+    return collection.trackIds.map((id) => byId.get(id)).filter(Boolean);
+  }
+
+  function likedTracks() {
+    return library.filter((track) => state.likedIds.includes(track.id));
+  }
+
+  function findCollection(type, id) {
+    if (type === 'playlist') return state.playlists.find((item) => item.id === id) ?? null;
+    if (type === 'album') return state.albums.find((item) => item.id === id) ?? null;
+    if (type === 'artist') return state.artists.find((item) => item.id === id) ?? null;
+    return null;
+  }
+
+  function tracksForDescriptor(collection) {
+    if (!collection) return [...library];
+    if (collection.type === 'liked') return likedTracks();
+    const found = findCollection(collection.type, collection.id);
+    return found ? collectionTracks(found) : null;
+  }
+
+  function historyEntry() {
+    return {
+      collection: state.activeCollection ? { ...state.activeCollection } : null,
+      trackId: state.tracks[state.currentIndex]?.id ?? null,
+    };
+  }
+
+  function activateQueue(
+    nextTracks,
+    activeCollection,
+    preferredTrackId = null,
+    { pushHistory = true } = {},
+  ) {
     const list = Array.isArray(nextTracks) ? [...nextTracks] : [];
+    const descriptor = descriptorOf(activeCollection);
     const currentId = state.tracks[state.currentIndex]?.id ?? null;
     const wantedId = preferredTrackId ?? currentId;
 
@@ -180,17 +330,87 @@ export function createPlayerStore(
       if (found !== -1) index = found;
     }
 
-    setState({
+    const patch = {
       tracks: list,
       currentIndex: index,
-      activePlaylistId,
+      activeCollection: descriptor,
       currentTime: 0,
       duration: 0,
       isPlaying: false,
       error: null,
-    });
+    };
 
+    if (pushHistory && !sameCollection(state.activeCollection, descriptor)) {
+      patch.queueHistory = [...state.queueHistory, historyEntry()].slice(-QUEUE_HISTORY_LIMIT);
+    }
+
+    setState(patch);
     return list.length > 0;
+  }
+
+  function selectCollection(type, id, preferredTrackId = null) {
+    const collection = findCollection(type, id);
+    if (!collection) return false;
+    return activateQueue(collectionTracks(collection), collection, preferredTrackId);
+  }
+
+  function goBackQueue() {
+    const history = [...state.queueHistory];
+
+    while (history.length) {
+      const entry = history.pop();
+      const nextTracks = tracksForDescriptor(entry.collection);
+      if (!nextTracks) continue;
+
+      const list = [...nextTracks];
+      let index = 0;
+      if (entry.trackId) {
+        const found = list.findIndex((track) => track.id === entry.trackId);
+        if (found !== -1) index = found;
+      }
+
+      setState({
+        tracks: list,
+        currentIndex: index,
+        activeCollection: entry.collection ? descriptorOf(entry.collection) : null,
+        queueHistory: history,
+        currentTime: 0,
+        duration: 0,
+        isPlaying: false,
+        error: null,
+      });
+      return true;
+    }
+
+    setState({ queueHistory: [] });
+    return false;
+  }
+
+  function toggleLike(trackId) {
+    if (typeof trackId !== 'string') return false;
+
+    const hasTrack = state.likedIds.includes(trackId);
+    const likedIds = hasTrack
+      ? state.likedIds.filter((id) => id !== trackId)
+      : [...state.likedIds, trackId];
+    const patch = { likedIds };
+
+    // Keep an open Liked Songs queue in sync with the heart button.
+    if (state.activeCollection?.type === 'liked') {
+      const nextTracks = library.filter((track) => likedIds.includes(track.id));
+      const currentId = state.tracks[state.currentIndex]?.id ?? null;
+      const nextIndex = nextTracks.findIndex((track) => track.id === currentId);
+      patch.tracks = nextTracks;
+      patch.currentIndex = nextIndex === -1 ? 0 : nextIndex;
+      if (nextIndex === -1) {
+        patch.currentTime = 0;
+        patch.duration = 0;
+        patch.isPlaying = false;
+      }
+    }
+
+    setState(patch);
+    return !hasTrack;
   }
 
   return {
@@ -206,17 +426,37 @@ export function createPlayerStore(
       if (index === state.currentIndex) return;
       setState({ currentIndex: index, currentTime: 0, duration: 0, error: null });
     },
-    setQueue(nextTracks, { activePlaylistId = null, selectedTrackId = null } = {}) {
-      return activateQueue(nextTracks, activePlaylistId, selectedTrackId);
+    setQueue(
+      nextTracks,
+      { activeCollection = null, selectedTrackId = null, pushHistory = true } = {},
+    ) {
+      return activateQueue(nextTracks, activeCollection, selectedTrackId, { pushHistory });
     },
     selectPlaylist(playlistId = null) {
-      const playlist = playlistId
-        ? state.playlists.find((item) => item.id === playlistId) ?? null
-        : null;
-      return activateQueue(playlistTracks(playlist), playlist ? playlist.id : null);
+      if (!playlistId) return activateQueue(library, null);
+      return selectCollection('playlist', playlistId);
+    },
+    selectAlbum(albumId) {
+      return selectCollection('album', albumId);
+    },
+    selectArtist(artistId) {
+      return selectCollection('artist', artistId);
+    },
+    selectLiked() {
+      return activateQueue(likedTracks(), {
+        type: 'liked',
+        id: 'liked',
+        name: 'Liked Songs',
+      });
     },
     selectLibrary() {
       return activateQueue(library, null);
+    },
+    goBackQueue() {
+      return goBackQueue();
+    },
+    toggleLike(trackId) {
+      return toggleLike(trackId);
     },
     createPlaylist(name, trackId = null) {
       const trimmed = String(name ?? '').trim().slice(0, 40);
@@ -245,7 +485,7 @@ export function createPlayerStore(
       const patch = { playlists: nextPlaylists };
 
       // Keep the active queue in sync when the playlist it belongs to changes.
-      if (state.activePlaylistId === playlistId) {
+      if (state.activeCollection?.type === 'playlist' && state.activeCollection.id === playlistId) {
         const nextTracks = playlistTracks({ ...playlist, trackIds });
         const currentId = state.tracks[state.currentIndex]?.id ?? null;
         const nextIndex = nextTracks.findIndex((track) => track.id === currentId);
