@@ -38,6 +38,7 @@ const icons = {
   back: `<path d="m15 18-6-6 6-6"/>`,
   album: `<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.6"/>`,
   artist: `<circle cx="12" cy="8" r="3.4"/><path d="M5 20a7 7 0 0 1 14 0"/>`,
+  more: `<circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/>`,
   settings: `<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>`,
 };
 
@@ -417,6 +418,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
   let queueItems = [];
   let renderedQueueKey = null;
   let renderedSidebarKey = null;
+  let openPlaylistMenuId = null;
+  let renamingPlaylistId = null;
   let trackLookup = new Map();
 
   const artObserver =
@@ -523,6 +526,10 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
   function setSidebarOpen(open) {
     sidebarOpen = open;
+    if (!open) {
+      openPlaylistMenuId = null;
+      renamingPlaylistId = null;
+    }
     if (open) {
       const activeType = store.getState().activeCollection?.type;
       if (activeType === 'album') sidebarFilter = 'albums';
@@ -535,6 +542,13 @@ export function renderPlayer(root, { store, audio, artwork }) {
     elements.sidebarBackdrop.classList.toggle('is-open', open);
     elements.sidebar.setAttribute('aria-hidden', String(!open));
     elements.sidebarToggle.setAttribute('aria-expanded', String(open));
+  }
+
+  function closePlaylistMenu() {
+    if (openPlaylistMenuId === null) return;
+    openPlaylistMenuId = null;
+    renamingPlaylistId = null;
+    if (sidebarOpen) renderSidebar();
   }
 
   function getSearchResults() {
@@ -750,6 +764,77 @@ export function renderPlayer(root, { store, audio, artwork }) {
       `;
     };
 
+    const playlistRow = (playlist) => {
+      const menuOpen = openPlaylistMenuId === playlist.id;
+      const renaming = menuOpen && renamingPlaylistId === playlist.id;
+      const trackCount = playlist.trackIds.length;
+
+      return `
+        <div class="sidebar__row${menuOpen ? ' is-menu-open' : ''}">
+          <div class="sidebar__row-main">
+            ${item({
+              type: 'playlist',
+              id: playlist.id,
+              name: playlist.name,
+              subtitle: `Playlist · ${trackCount} ${trackCount === 1 ? 'song' : 'songs'}`,
+              count: trackCount,
+              track: trackFor(playlist.trackIds),
+              iconName: 'playlist',
+            })}
+            <button
+              class="sidebar__more${menuOpen ? ' is-active' : ''}"
+              type="button"
+              data-playlist-menu-toggle="${escapeHtml(playlist.id)}"
+              aria-label="Options for ${escapeHtml(playlist.name)}"
+              aria-expanded="${String(menuOpen)}"
+              title="Playlist options"
+            >${icon('more')}</button>
+          </div>
+          <div
+            class="sidebar__actions"
+            data-playlist-actions="${escapeHtml(playlist.id)}"
+            ${menuOpen ? '' : 'hidden'}
+          >
+            ${
+              renaming
+                ? `
+                  <form
+                    class="sidebar__rename"
+                    data-playlist-rename-form
+                    data-playlist-id="${escapeHtml(playlist.id)}"
+                  >
+                    <input
+                      class="sidebar__rename-input"
+                      type="text"
+                      maxlength="40"
+                      value="${escapeHtml(playlist.name)}"
+                      aria-label="Playlist name"
+                      autocomplete="off"
+                      data-playlist-rename-input
+                    />
+                    <button class="sidebar__rename-save" type="submit" data-playlist-rename-save>Save</button>
+                  </form>
+                `
+                : `
+                  <button
+                    class="sidebar__action"
+                    type="button"
+                    data-playlist-action="rename"
+                    data-playlist-id="${escapeHtml(playlist.id)}"
+                  >Rename</button>
+                  <button
+                    class="sidebar__action sidebar__action--danger"
+                    type="button"
+                    data-playlist-action="delete"
+                    data-playlist-id="${escapeHtml(playlist.id)}"
+                  >Delete</button>
+                `
+            }
+          </div>
+        </div>
+      `;
+    };
+
     let html = '';
 
     if (sidebarFilter === 'playlists') {
@@ -777,21 +862,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
       });
 
       if (state.playlists.length) {
-        html += state.playlists
-          .map((playlist) =>
-            item({
-              type: 'playlist',
-              id: playlist.id,
-              name: playlist.name,
-              subtitle: `Playlist · ${playlist.trackIds.length} ${
-                playlist.trackIds.length === 1 ? 'song' : 'songs'
-              }`,
-              count: playlist.trackIds.length,
-              track: trackFor(playlist.trackIds),
-              iconName: 'playlist',
-            }),
-          )
-          .join('');
+        html += state.playlists.map(playlistRow).join('');
       } else {
         html += '<p class="sidebar__empty">No playlists yet. Create one below.</p>';
       }
@@ -1016,7 +1087,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
     elements.volumeLabel.textContent = muted ? 'Muted' : `${Math.round(volume * 100)}%`;
 
     const collectionKey = state.activeCollection
-      ? `${state.activeCollection.type}:${state.activeCollection.id}`
+      ? `${state.activeCollection.type}:${state.activeCollection.id}:${state.activeCollection.name}`
       : 'library';
     const queueKey = `${collectionKey}|${tracks.map((track) => track.id).join(',')}`;
     if (queueKey !== renderedQueueKey) {
@@ -1029,7 +1100,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
     elements.queueBack.hidden = !canGoBack;
 
     const sidebarKey = `${sidebarFilter}|${collectionKey}|${state.playlists
-      .map((playlist) => `${playlist.id}:${playlist.trackIds.join(',')}`)
+      .map((playlist) => `${playlist.id}:${playlist.name}:${playlist.trackIds.join(',')}`)
       .join('|')}|${state.albums.map((album) => album.id).join(',')}|${state.artists
       .map((artist) => artist.id)
       .join(',')}|${state.likedIds.join(',')}|${state.library.length}`;
@@ -1092,28 +1163,87 @@ export function renderPlayer(root, { store, audio, artwork }) {
     const button = event.target.closest('[data-sidebar-filter]');
     if (!button) return;
     sidebarFilter = button.dataset.sidebarFilter;
+    openPlaylistMenuId = null;
+    renamingPlaylistId = null;
     renderSidebar();
   });
 
-  elements.sidebarList.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-collection-type]');
-    if (!button) return;
-
-    setSidebarOpen(false);
+  function selectCollectionFromSidebar(button) {
     clearSearch();
 
     const type = button.dataset.collectionType;
     const collectionId = button.dataset.collectionId || null;
-
-    // Browsing a collection only swaps the visible queue. It must never start
-    // playback on its own; the user presses play when they want sound.
-    audio.pause();
 
     if (type === 'playlist') store.selectPlaylist(collectionId);
     else if (type === 'album') store.selectAlbum(collectionId);
     else if (type === 'artist') store.selectArtist(collectionId);
     else if (type === 'liked') store.selectLiked();
     else store.selectLibrary();
+  }
+
+  elements.sidebarList.addEventListener('click', (event) => {
+    const menuToggle = event.target.closest('[data-playlist-menu-toggle]');
+    if (menuToggle) {
+      const playlistId = menuToggle.dataset.playlistMenuToggle;
+      const willOpen = openPlaylistMenuId !== playlistId;
+      openPlaylistMenuId = willOpen ? playlistId : null;
+      renamingPlaylistId = null;
+      renderSidebar();
+      return;
+    }
+
+    const action = event.target.closest('[data-playlist-action]');
+    if (action) {
+      const playlistId = action.dataset.playlistId;
+      if (action.dataset.playlistAction === 'rename') {
+        openPlaylistMenuId = playlistId;
+        renamingPlaylistId = playlistId;
+        renderSidebar();
+        const input = elements.sidebarList.querySelector('[data-playlist-rename-input]');
+        if (input) {
+          input.focus();
+          input.select();
+        }
+      } else if (action.dataset.playlistAction === 'delete') {
+        openPlaylistMenuId = null;
+        renamingPlaylistId = null;
+        store.deletePlaylist(playlistId);
+        renderSidebar();
+      }
+      return;
+    }
+
+    const button = event.target.closest('[data-collection-type]');
+    if (!button) return;
+
+    // Browsing a collection only swaps the visible queue. It must never start
+    // playback on its own; double-clicking (or pressing play) makes sound.
+    audio.pause();
+    selectCollectionFromSidebar(button);
+  });
+
+  elements.sidebarList.addEventListener('dblclick', (event) => {
+    const button = event.target.closest('[data-collection-type]');
+    if (!button) return;
+
+    event.preventDefault();
+    selectCollectionFromSidebar(button);
+    audio.play();
+  });
+
+  elements.sidebarList.addEventListener('submit', (event) => {
+    const form = event.target.closest('[data-playlist-rename-form]');
+    if (!form) return;
+
+    event.preventDefault();
+    const playlistId = form.dataset.playlistId;
+    const input = form.querySelector('[data-playlist-rename-input]');
+    const name = input ? input.value.trim() : '';
+
+    openPlaylistMenuId = null;
+    renamingPlaylistId = null;
+    if (name) store.renamePlaylist(playlistId, name);
+    renderSidebar();
   });
 
   elements.sidebarCreateForm.addEventListener('submit', (event) => {
@@ -1204,7 +1334,6 @@ export function renderPlayer(root, { store, audio, artwork }) {
   });
 
   elements.queueBack.addEventListener('click', () => {
-    audio.pause();
     clearSearch();
     store.goBackQueue();
   });
@@ -1223,6 +1352,11 @@ export function renderPlayer(root, { store, audio, artwork }) {
       if (!elements.playlistMenu.hidden) {
         setPlaylistOpen(false);
         elements.playlistToggle.focus();
+        return;
+      }
+      if (openPlaylistMenuId !== null) {
+        closePlaylistMenu();
+        elements.sidebarToggle.focus();
         return;
       }
       if (sidebarOpen) {
@@ -1303,6 +1437,12 @@ export function renderPlayer(root, { store, audio, artwork }) {
   }
 
   function handleDocumentClick(event) {
+    if (openPlaylistMenuId !== null && event.target instanceof Element) {
+      const insideActions = event.target.closest('[data-playlist-actions]');
+      const insideToggle = event.target.closest('[data-playlist-menu-toggle]');
+      if (!insideActions && !insideToggle) closePlaylistMenu();
+    }
+
     if (!elements.playlistMenu.hidden) {
       if (
         !elements.playlistMenu.contains(event.target) &&

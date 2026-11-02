@@ -59,6 +59,7 @@ function readPlaylists(storageKey) {
         return {
           id: playlist.id,
           name: playlist.name,
+          type: 'playlist',
           trackIds: trackIds.filter((id) => typeof id === 'string'),
         };
       });
@@ -356,6 +357,7 @@ export function createPlayerStore(
 
   function goBackQueue() {
     const history = [...state.queueHistory];
+    const playingId = state.tracks[state.currentIndex]?.id ?? null;
 
     while (history.length) {
       const entry = history.pop();
@@ -363,22 +365,34 @@ export function createPlayerStore(
       if (!nextTracks) continue;
 
       const list = [...nextTracks];
-      let index = 0;
-      if (entry.trackId) {
-        const found = list.findIndex((track) => track.id === entry.trackId);
-        if (found !== -1) index = found;
+      let index = playingId ? list.findIndex((track) => track.id === playingId) : -1;
+      const keepsPlayingTrack = index !== -1;
+
+      if (!keepsPlayingTrack) {
+        index = entry.trackId
+          ? list.findIndex((track) => track.id === entry.trackId)
+          : -1;
+        if (index === -1) index = 0;
       }
 
-      setState({
+      const patch = {
         tracks: list,
         currentIndex: index,
         activeCollection: entry.collection ? descriptorOf(entry.collection) : null,
         queueHistory: history,
-        currentTime: 0,
-        duration: 0,
-        isPlaying: false,
         error: null,
-      });
+      };
+
+      // Going back should only change the visible queue when the song that is
+      // playing also belongs to the previous queue. Otherwise the track has to
+      // change, so playback is reset.
+      if (!keepsPlayingTrack) {
+        patch.currentTime = 0;
+        patch.duration = 0;
+        patch.isPlaying = false;
+      }
+
+      setState(patch);
       return true;
     }
 
@@ -465,6 +479,7 @@ export function createPlayerStore(
       const playlist = {
         id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
         name: trimmed,
+        type: 'playlist',
         trackIds: trackId ? [trackId] : [],
       };
 
@@ -500,6 +515,68 @@ export function createPlayerStore(
 
       setState(patch);
       return !hasTrack;
+    },
+    renamePlaylist(playlistId, name) {
+      const trimmed = String(name ?? '').trim().slice(0, 40);
+      if (!trimmed) return false;
+
+      const playlist = state.playlists.find((item) => item.id === playlistId);
+      if (!playlist) return false;
+      if (playlist.name === trimmed) return true;
+
+      const nextPlaylists = state.playlists.map((item) =>
+        item.id === playlistId ? { ...item, name: trimmed } : item,
+      );
+      const patch = {
+        playlists: nextPlaylists,
+        queueHistory: state.queueHistory.map((entry) =>
+          entry.collection?.type === 'playlist' && entry.collection.id === playlistId
+            ? { ...entry, collection: { ...entry.collection, name: trimmed } }
+            : entry,
+        ),
+      };
+
+      if (state.activeCollection?.type === 'playlist' && state.activeCollection.id === playlistId) {
+        patch.activeCollection = { ...state.activeCollection, name: trimmed };
+      }
+
+      setState(patch);
+      return true;
+    },
+    deletePlaylist(playlistId) {
+      const playlist = state.playlists.find((item) => item.id === playlistId);
+      if (!playlist) return false;
+
+      const patch = {
+        playlists: state.playlists.filter((item) => item.id !== playlistId),
+        queueHistory: state.queueHistory.filter(
+          (entry) =>
+            !(entry.collection?.type === 'playlist' && entry.collection.id === playlistId),
+        ),
+      };
+
+      // If the playing playlist disappears, fall back to the full library while
+      // keeping the current song and playback position intact when possible.
+      if (state.activeCollection?.type === 'playlist' && state.activeCollection.id === playlistId) {
+        const currentId = state.tracks[state.currentIndex]?.id ?? null;
+        const index = currentId ? library.findIndex((track) => track.id === currentId) : -1;
+
+        patch.tracks = [...library];
+        patch.activeCollection = null;
+        patch.error = null;
+
+        if (index === -1) {
+          patch.currentIndex = 0;
+          patch.currentTime = 0;
+          patch.duration = 0;
+          patch.isPlaying = false;
+        } else {
+          patch.currentIndex = index;
+        }
+      }
+
+      setState(patch);
+      return true;
     },
     next,
     previous,
