@@ -164,7 +164,12 @@ export function createPlayerStore(
   const { albums, artists } = buildCollections(library);
 
   let state = {
+    // `tracks` / `currentIndex` are the playback queue. They only change when
+    // the listener actually starts playing something.
     tracks: [...library],
+    // `displayedTracks` / `activeCollection` are what the queue panel shows.
+    // Browsing (single clicks, back navigation) changes only these.
+    displayedTracks: [...library],
     library,
     libraryRoot,
     libraryError,
@@ -175,6 +180,8 @@ export function createPlayerStore(
     likedIds: readLiked(likedKey),
     // `activeCollection` is null for the full library ("All Songs").
     activeCollection: null,
+    // Which collection the playback queue came from, if any.
+    playbackCollection: null,
     queueHistory: [],
     currentIndex: 0,
     isPlaying: false,
@@ -310,10 +317,30 @@ export function createPlayerStore(
   function historyEntry() {
     return {
       collection: state.activeCollection ? { ...state.activeCollection } : null,
-      trackId: state.tracks[state.currentIndex]?.id ?? null,
+      trackIds: state.displayedTracks.map((track) => track.id),
     };
   }
 
+  // Swaps the visible queue without touching playback. Used by sidebar
+  // browsing and by Back navigation.
+  function displayQueue(nextTracks, activeCollection, { pushHistory = true } = {}) {
+    const list = Array.isArray(nextTracks) ? [...nextTracks] : [];
+    const descriptor = descriptorOf(activeCollection);
+    const patch = {
+      displayedTracks: list,
+      activeCollection: descriptor,
+    };
+
+    if (pushHistory && !sameCollection(state.activeCollection, descriptor)) {
+      patch.queueHistory = [...state.queueHistory, historyEntry()].slice(-QUEUE_HISTORY_LIMIT);
+    }
+
+    setState(patch);
+    return list.length > 0;
+  }
+
+  // Replaces both queues and starts a new playback context. Used when the
+  // listener explicitly asks to play a collection or track.
   function activateQueue(
     nextTracks,
     activeCollection,
@@ -333,8 +360,10 @@ export function createPlayerStore(
 
     const patch = {
       tracks: list,
+      displayedTracks: list,
       currentIndex: index,
       activeCollection: descriptor,
+      playbackCollection: descriptor,
       currentTime: 0,
       duration: 0,
       isPlaying: false,
@@ -349,50 +378,97 @@ export function createPlayerStore(
     return list.length > 0;
   }
 
-  function selectCollection(type, id, preferredTrackId = null) {
+  function selectCollection(type, id) {
     const collection = findCollection(type, id);
     if (!collection) return false;
-    return activateQueue(collectionTracks(collection), collection, preferredTrackId);
+    return displayQueue(collectionTracks(collection), collection);
   }
 
+  // Promote the currently displayed queue to the playback queue.
+  function playDisplayed(preferredTrackId = null) {
+    const list = [...state.displayedTracks];
+    if (!list.length) return false;
+
+    const currentId = state.tracks[state.currentIndex]?.id ?? null;
+    let index = preferredTrackId
+      ? list.findIndex((track) => track.id === preferredTrackId)
+      : -1;
+
+    if (index === -1 && !preferredTrackId && currentId) {
+      index = list.findIndex((track) => track.id === currentId);
+    }
+    if (index === -1) index = 0;
+
+    setState({
+      tracks: list,
+      currentIndex: index,
+      playbackCollection: state.activeCollection ? { ...state.activeCollection } : null,
+      currentTime: 0,
+      duration: 0,
+      error: null,
+    });
+    return true;
+  }
+
+  // Play a track from the displayed queue, or fall back to the library when it
+  // came from the "All Songs" search results.
+  function playTrack(trackId) {
+    let index = state.displayedTracks.findIndex((track) => track.id === trackId);
+
+    if (index !== -1) {
+      setState({
+        tracks: [...state.displayedTracks],
+        currentIndex: index,
+        playbackCollection: state.activeCollection ? { ...state.activeCollection } : null,
+        currentTime: 0,
+        duration: 0,
+        error: null,
+      });
+      return true;
+    }
+
+    index = state.library.findIndex((track) => track.id === trackId);
+    if (index === -1) return false;
+
+    const patch = {
+      tracks: [...library],
+      displayedTracks: [...library],
+      currentIndex: index,
+      activeCollection: null,
+      playbackCollection: null,
+      currentTime: 0,
+      duration: 0,
+      error: null,
+    };
+
+    if (state.activeCollection) {
+      patch.queueHistory = [...state.queueHistory, historyEntry()].slice(-QUEUE_HISTORY_LIMIT);
+    }
+
+    setState(patch);
+    return true;
+  }
+
+  // Back only rewinds the browsed queue/history; it never changes which song
+  // is loaded or whether it is playing.
   function goBackQueue() {
     const history = [...state.queueHistory];
-    const playingId = state.tracks[state.currentIndex]?.id ?? null;
 
     while (history.length) {
       const entry = history.pop();
-      const nextTracks = tracksForDescriptor(entry.collection);
-      if (!nextTracks) continue;
+      let list = tracksForDescriptor(entry.collection);
 
-      const list = [...nextTracks];
-      let index = playingId ? list.findIndex((track) => track.id === playingId) : -1;
-      const keepsPlayingTrack = index !== -1;
-
-      if (!keepsPlayingTrack) {
-        index = entry.trackId
-          ? list.findIndex((track) => track.id === entry.trackId)
-          : -1;
-        if (index === -1) index = 0;
+      if (!list && Array.isArray(entry.trackIds)) {
+        const byId = new Map(library.map((track) => [track.id, track]));
+        list = entry.trackIds.map((id) => byId.get(id)).filter(Boolean);
       }
+      if (!list) continue;
 
-      const patch = {
-        tracks: list,
-        currentIndex: index,
+      setState({
+        displayedTracks: [...list],
         activeCollection: entry.collection ? descriptorOf(entry.collection) : null,
         queueHistory: history,
-        error: null,
-      };
-
-      // Going back should only change the visible queue when the song that is
-      // playing also belongs to the previous queue. Otherwise the track has to
-      // change, so playback is reset.
-      if (!keepsPlayingTrack) {
-        patch.currentTime = 0;
-        patch.duration = 0;
-        patch.isPlaying = false;
-      }
-
-      setState(patch);
+      });
       return true;
     }
 
@@ -408,10 +484,16 @@ export function createPlayerStore(
       ? state.likedIds.filter((id) => id !== trackId)
       : [...state.likedIds, trackId];
     const patch = { likedIds };
+    const nextLikedTracks = () => library.filter((track) => likedIds.includes(track.id));
 
-    // Keep an open Liked Songs queue in sync with the heart button.
+    // Keep an open Liked Songs view in sync with the heart button.
     if (state.activeCollection?.type === 'liked') {
-      const nextTracks = library.filter((track) => likedIds.includes(track.id));
+      patch.displayedTracks = nextLikedTracks();
+    }
+
+    // And keep an active Liked Songs playback queue in sync as well.
+    if (state.playbackCollection?.type === 'liked') {
+      const nextTracks = nextLikedTracks();
       const currentId = state.tracks[state.currentIndex]?.id ?? null;
       const nextIndex = nextTracks.findIndex((track) => track.id === currentId);
       patch.tracks = nextTracks;
@@ -440,6 +522,12 @@ export function createPlayerStore(
       if (index === state.currentIndex) return;
       setState({ currentIndex: index, currentTime: 0, duration: 0, error: null });
     },
+    playDisplayed(preferredTrackId = null) {
+      return playDisplayed(preferredTrackId);
+    },
+    playTrack(trackId) {
+      return playTrack(trackId);
+    },
     setQueue(
       nextTracks,
       { activeCollection = null, selectedTrackId = null, pushHistory = true } = {},
@@ -447,7 +535,7 @@ export function createPlayerStore(
       return activateQueue(nextTracks, activeCollection, selectedTrackId, { pushHistory });
     },
     selectPlaylist(playlistId = null) {
-      if (!playlistId) return activateQueue(library, null);
+      if (!playlistId) return displayQueue(library, null);
       return selectCollection('playlist', playlistId);
     },
     selectAlbum(albumId) {
@@ -457,14 +545,14 @@ export function createPlayerStore(
       return selectCollection('artist', artistId);
     },
     selectLiked() {
-      return activateQueue(likedTracks(), {
+      return displayQueue(likedTracks(), {
         type: 'liked',
         id: 'liked',
         name: 'Liked Songs',
       });
     },
     selectLibrary() {
-      return activateQueue(library, null);
+      return displayQueue(library, null);
     },
     goBackQueue() {
       return goBackQueue();
@@ -499,8 +587,13 @@ export function createPlayerStore(
       );
       const patch = { playlists: nextPlaylists };
 
-      // Keep the active queue in sync when the playlist it belongs to changes.
+      // Keep the browsed playlist view in sync.
       if (state.activeCollection?.type === 'playlist' && state.activeCollection.id === playlistId) {
+        patch.displayedTracks = playlistTracks({ ...playlist, trackIds });
+      }
+
+      // And keep the playback queue in sync when it belongs to that playlist.
+      if (state.playbackCollection?.type === 'playlist' && state.playbackCollection.id === playlistId) {
         const nextTracks = playlistTracks({ ...playlist, trackIds });
         const currentId = state.tracks[state.currentIndex]?.id ?? null;
         const nextIndex = nextTracks.findIndex((track) => track.id === currentId);
@@ -539,6 +632,9 @@ export function createPlayerStore(
       if (state.activeCollection?.type === 'playlist' && state.activeCollection.id === playlistId) {
         patch.activeCollection = { ...state.activeCollection, name: trimmed };
       }
+      if (state.playbackCollection?.type === 'playlist' && state.playbackCollection.id === playlistId) {
+        patch.playbackCollection = { ...state.playbackCollection, name: trimmed };
+      }
 
       setState(patch);
       return true;
@@ -555,15 +651,20 @@ export function createPlayerStore(
         ),
       };
 
+      // If the browsed playlist disappears, fall back to the full library view.
+      if (state.activeCollection?.type === 'playlist' && state.activeCollection.id === playlistId) {
+        patch.displayedTracks = [...library];
+        patch.activeCollection = null;
+      }
+
       // If the playing playlist disappears, fall back to the full library while
       // keeping the current song and playback position intact when possible.
-      if (state.activeCollection?.type === 'playlist' && state.activeCollection.id === playlistId) {
+      if (state.playbackCollection?.type === 'playlist' && state.playbackCollection.id === playlistId) {
         const currentId = state.tracks[state.currentIndex]?.id ?? null;
         const index = currentId ? library.findIndex((track) => track.id === currentId) : -1;
 
         patch.tracks = [...library];
-        patch.activeCollection = null;
-        patch.error = null;
+        patch.playbackCollection = null;
 
         if (index === -1) {
           patch.currentIndex = 0;

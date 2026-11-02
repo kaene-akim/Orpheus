@@ -556,8 +556,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
     const needle = searchQuery.toLowerCase();
     const collection = state.activeCollection;
     const matches = (track) => trackHaystack(track).includes(needle);
-    const collectionMatches = collection ? state.tracks.filter(matches) : [];
-    const queuedIds = new Set(state.tracks.map((track) => track.id));
+    const collectionMatches = collection ? state.displayedTracks.filter(matches) : [];
+    const queuedIds = new Set(state.displayedTracks.map((track) => track.id));
     // On the library queue every song is already in the active queue, so list
     // the library itself instead of excluding everything as "other songs".
     const otherMatches = collection
@@ -645,7 +645,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
       return;
     }
 
-    const total = state.tracks.length;
+    const total = state.displayedTracks.length;
     elements.count.textContent = `${total} ${total === 1 ? 'track' : 'tracks'}`;
   }
 
@@ -683,8 +683,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
           Press <kbd>Shift</kbd> + <kbd>Enter</kbd> to search YouTube
         </li>
       `;
-    } else if (state.tracks.length) {
-      html = state.tracks.map(trackRow).join('');
+    } else if (state.displayedTracks.length) {
+      html = state.displayedTracks.map(trackRow).join('');
     } else if (state.libraryError) {
       html = noResultRow(state.libraryError);
     } else if (state.libraryMessage) {
@@ -953,19 +953,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
   }
 
   function playTrack(trackId) {
-    const state = store.getState();
-    let index = state.tracks.findIndex((track) => track.id === trackId);
-
-    if (index !== -1) {
-      store.selectTrack(index);
-      audio.play();
-      return;
-    }
-
-    // The result came from "All Songs" while a playlist, album, or artist was playing.
-    index = state.library.findIndex((track) => track.id === trackId);
-    if (index === -1) return;
-    store.setQueue(state.library, { activeCollection: null, selectedTrackId: trackId });
+    // Clicking a song promotes the browsed queue to the playback queue.
+    if (!store.playTrack(trackId)) return;
     audio.play();
   }
 
@@ -997,6 +986,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
     trackLookup = new Map();
     state.library.forEach((track) => trackLookup.set(track.id, track));
     state.tracks.forEach((track) => trackLookup.set(track.id, track));
+    state.displayedTracks.forEach((track) => trackLookup.set(track.id, track));
 
     if (accent !== appliedAccent) {
       document.documentElement.style.setProperty('--accent', accent);
@@ -1089,7 +1079,9 @@ export function renderPlayer(root, { store, audio, artwork }) {
     const collectionKey = state.activeCollection
       ? `${state.activeCollection.type}:${state.activeCollection.id}:${state.activeCollection.name}`
       : 'library';
-    const queueKey = `${collectionKey}|${tracks.map((track) => track.id).join(',')}`;
+    const queueKey = `${collectionKey}|${state.displayedTracks
+      .map((track) => track.id)
+      .join(',')}`;
     if (queueKey !== renderedQueueKey) {
       renderedQueueKey = queueKey;
       renderQueue();
@@ -1216,9 +1208,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
     const button = event.target.closest('[data-collection-type]');
     if (!button) return;
 
-    // Browsing a collection only swaps the visible queue. It must never start
-    // playback on its own; double-clicking (or pressing play) makes sound.
-    audio.pause();
+    // Browsing a collection only swaps the visible queue. It must never start,
+    // pause, or change playback; double-clicking (or pressing play) makes sound.
     selectCollectionFromSidebar(button);
   });
 
@@ -1228,6 +1219,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
     event.preventDefault();
     selectCollectionFromSidebar(button);
+    // Double-click explicitly selects the collection, so start playback.
+    store.playDisplayed();
     audio.play();
   });
 
