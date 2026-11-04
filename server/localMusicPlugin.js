@@ -48,12 +48,21 @@ const MAX_COVER_BYTES = 8 * 1024 * 1024;
 const USER_AGENT = 'Orpheus/1.0.0 (local music player; https://github.com/kaene-akim/Orpheus)';
 const PLAYLIST_NAME_HINT =
   /\b(best of|playlist|mixtape|mix tape|top \d+|hits|chart|collection|compilation|throwback|party|road trip|workout)\b/i;
+const DOWNLOADER_ARTIST_HINT =
+  /(?:^|[\s/])(?:www\.)?[a-z0-9-]+\.(?:com|net|org|io|co|me|ru|to|cc|info|xyz)(?:$|[\s/])|songs?lover|mp3|download/i;
+const MUSICBRAINZ_RETRY_LIMIT = 3;
+const COVER_ART_RETRY_LIMIT = 2;
+const RETRY_BASE_MS = 1500;
 
 let metadataModulePromise = null;
 let artworkCache = new Map();
 let coverManifest = null;
 let coverManifestPromise = null;
 let lastMusicBrainzRequestAt = 0;
+let musicBrainzCooldownUntil = 0;
+// Shared progress for the long-running cover fetch so the settings panel can
+// show that work is still happening instead of looking stuck.
+let coverFetchJob = null;
 
 function metadataModule() {
   metadataModulePromise ??= import('music-metadata');
@@ -82,6 +91,19 @@ function normalizeText(value) {
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Folder and album names are often decorated differently ("Best of 2024 -
+// Part 1" vs "Best of 2024 - Part 1 - (SongsLover.com)"), so compare a version
+// with punctuation collapsed as well as the exact text.
+function foldText(value) {
+  return normalizeText(value)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function isDownloaderArtist(value) {
+  return DOWNLOADER_ARTIST_HINT.test(String(value ?? ''));
 }
 
 function coverExtension(type) {
@@ -135,14 +157,45 @@ async function saveCoverManifest() {
 }
 
 function albumCacheKey(track) {
+  // Playlist downloaders often put a fake collection name in the album tag.
+  // Those tracks are separate songs, so they must not share one cover.
+  if (track.albumIsPlaylistTag) return null;
+
   const album = track.albumTag;
-  const artist = track.albumArtist || primaryArtist(track);
+  // Album artist tags from download sites are not useful for grouping. Fall
+  // back to the actual track artist so different songs do not collide.
+  const taggedArtist = track.albumArtist;
+  const artist = isDownloaderArtist(taggedArtist)
+    ? primaryArtist(track)
+    : taggedArtist || primaryArtist(track);
   if (!album || !artist) return null;
-  // Playlist downloaders often rewrite every track's album tag to the folder
-  // name. Those are separate songs, so only share a cover when the tag names a
-  // real album outside the playlist folder.
-  if (normalizeText(album) === normalizeText(track.folderName)) return null;
   return `${normalizeText(artist)}\u0000${normalizeText(album)}`;
+}
+
+// Decide whether a playlist track's album tag describes a real release or just
+// the playlist/collection it was downloaded from.
+function isPlaylistAlbumTag(track, artistsByAlbum) {
+  const album = track.albumTag;
+  if (!album) return false;
+
+  const albumName = foldText(album);
+  const folderName = foldText(track.folderName);
+  if (
+    albumName &&
+    folderName &&
+    (albumName === folderName ||
+      folderName.startsWith(`${albumName} `) ||
+      albumName.startsWith(`${folderName} `))
+  ) {
+    return true;
+  }
+
+  const artists = artistsByAlbum.get(normalizeText(album));
+  if (artists && artists.size >= 2) return true;
+
+  // A playlist-style album name inside a playlist-style folder is almost
+  // always a collection tag rather than a real album.
+  return PLAYLIST_NAME_HINT.test(album) && PLAYLIST_NAME_HINT.test(track.folderName);
 }
 
 function cachedCoverEntry(entry, manifest) {
@@ -169,6 +222,65 @@ function cachedAlbumCover(track, manifest) {
 
 function cachedCoverForTrack(track, manifest) {
   return cachedCover(track.id, manifest) ?? cachedAlbumCover(track, manifest);
+}
+
+function applyTrackArtwork(track, manifest) {
+  const cover = cachedCoverForTrack(track, manifest);
+  if (cover) {
+    track.hasArtwork = true;
+    track.artwork = cover.url;
+    track.artworkType = cover.type;
+    return;
+  }
+
+  const embedded =
+    track.embeddedArtwork ??
+    (String(track.artwork ?? '').startsWith('/api/artwork/') ? track.artwork : null);
+  if (embedded) {
+    track.hasArtwork = true;
+    track.artwork = embedded;
+    track.artworkType = track.embeddedArtworkType || 'image/jpeg';
+    return;
+  }
+
+  track.hasArtwork = false;
+  delete track.artwork;
+  delete track.artworkType;
+}
+
+// Playlist folders need a second pass: the folder has to be classified before
+// we can tell whether an album tag is a real release or just the playlist name.
+function annotatePlaylistAlbums(tracks, playlists, manifest) {
+  const byId = new Map(tracks.map((track) => [track.id, track]));
+  const flags = new Map();
+
+  playlists.forEach((playlist) => {
+    const list = playlist.trackIds
+      .map((id) => byId.get(id))
+      .filter(Boolean);
+    const artistsByAlbum = new Map();
+
+    list.forEach((track) => {
+      if (!track.albumTag) return;
+      const key = normalizeText(track.albumTag);
+      let artists = artistsByAlbum.get(key);
+      if (!artists) {
+        artists = new Set();
+        artistsByAlbum.set(key, artists);
+      }
+      artists.add(normalizeText(primaryArtist(track)));
+    });
+
+    list.forEach((track) => {
+      if (flags.has(track.id)) return;
+      flags.set(track.id, isPlaylistAlbumTag(track, artistsByAlbum));
+    });
+  });
+
+  tracks.forEach((track) => {
+    track.albumIsPlaylistTag = flags.get(track.id) ?? false;
+    applyTrackArtwork(track, manifest);
+  });
 }
 
 function mostCommon(values) {
@@ -235,8 +347,19 @@ function buildFolderPlaylists(tracks) {
       normalizeText(dominantAlbum) === normalizeText(folderName) &&
       list.length >= 8 &&
       distinctArtists.size >= 5;
+    // Some downloaders tag every file with a collection name instead of the
+    // real album. Recognise that shape even when the folder name alone looks
+    // harmless.
+    const collectionAlbum =
+      Boolean(dominantAlbum) &&
+      normalizeText(dominantAlbum) !== normalizeText(folderName) &&
+      PLAYLIST_NAME_HINT.test(dominantAlbum) &&
+      list.length >= 4 &&
+      distinctArtists.size >= 3;
 
-    if (!mixedAlbums && !hintedCollection && !compilationFolder) return;
+    if (!mixedAlbums && !hintedCollection && !compilationFolder && !collectionAlbum) {
+      return;
+    }
 
     const ordered = [...list].sort((left, right) =>
       trackFileName(left).localeCompare(trackFileName(right), undefined, {
@@ -264,20 +387,75 @@ function wait(ms) {
   });
 }
 
-async function musicBrainzJson(pathname) {
-  const elapsed = Date.now() - lastMusicBrainzRequestAt;
-  if (elapsed < MUSICBRAINZ_INTERVAL_MS) await wait(MUSICBRAINZ_INTERVAL_MS - elapsed);
-  lastMusicBrainzRequestAt = Date.now();
+function retryAfterMs(response) {
+  if (!response) return null;
+  const header = response.headers.get('retry-after');
+  if (!header) return null;
 
-  const response = await fetch(`${MUSICBRAINZ_URL}${pathname}`, {
-    headers: {
-      Accept: 'application/json',
-      'User-Agent': USER_AGENT,
-    },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`MusicBrainz returned ${response.status}`);
-  return response.json();
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+
+  const date = Date.parse(header);
+  if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  return null;
+}
+
+function retryDelay(attempt, response) {
+  return retryAfterMs(response) ?? Math.min(RETRY_BASE_MS * 2 ** attempt, 30000);
+}
+
+async function waitForMusicBrainzSlot() {
+  const earliest = Math.max(
+    lastMusicBrainzRequestAt + MUSICBRAINZ_INTERVAL_MS,
+    musicBrainzCooldownUntil,
+  );
+  const delay = earliest - Date.now();
+  if (delay > 0) await wait(delay);
+  lastMusicBrainzRequestAt = Date.now();
+}
+
+async function musicBrainzJson(pathname) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= MUSICBRAINZ_RETRY_LIMIT; attempt += 1) {
+    await waitForMusicBrainzSlot();
+
+    let response;
+    try {
+      response = await fetch(`${MUSICBRAINZ_URL}${pathname}`, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': USER_AGENT,
+        },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt >= MUSICBRAINZ_RETRY_LIMIT) break;
+      musicBrainzCooldownUntil = Math.max(
+        musicBrainzCooldownUntil,
+        Date.now() + retryDelay(attempt),
+      );
+      continue;
+    }
+
+    if (response.ok) return response.json();
+
+    lastError = new Error(`MusicBrainz returned ${response.status}`);
+    if (
+      (response.status !== 429 && response.status !== 503 && response.status < 500) ||
+      attempt >= MUSICBRAINZ_RETRY_LIMIT
+    ) {
+      break;
+    }
+
+    musicBrainzCooldownUntil = Math.max(
+      musicBrainzCooldownUntil,
+      Date.now() + retryDelay(attempt, response),
+    );
+  }
+
+  throw lastError ?? new Error('MusicBrainz request failed.');
 }
 
 async function readImageResponse(response) {
@@ -294,17 +472,38 @@ async function readImageResponse(response) {
   return { buffer, type };
 }
 
-async function fetchCoverArt(pathname) {
+async function fetchCoverArt(pathname, attempt = 0) {
+  let response;
   try {
-    const response = await fetch(`${COVER_ART_URL}${pathname}`, {
+    response = await fetch(`${COVER_ART_URL}${pathname}`, {
       headers: { 'User-Agent': USER_AGENT },
       redirect: 'follow',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    return await readImageResponse(response);
   } catch {
-    return null;
+    if (attempt >= COVER_ART_RETRY_LIMIT) return null;
+    await wait(Math.min(1000 * 2 ** attempt, 10000));
+    return fetchCoverArt(pathname, attempt + 1);
   }
+
+  if (response.ok) {
+    try {
+      return await readImageResponse(response);
+    } catch {
+      return null;
+    }
+  }
+
+  if (
+    (response.status === 429 || response.status >= 500) &&
+    attempt < COVER_ART_RETRY_LIMIT
+  ) {
+    const delay = retryAfterMs(response) ?? Math.min(1000 * 2 ** attempt, 10000);
+    await wait(delay);
+    return fetchCoverArt(pathname, attempt + 1);
+  }
+
+  return null;
 }
 
 async function coverFromRelease(release) {
@@ -332,6 +531,63 @@ function primaryArtist(track) {
     track.artist ||
     ''
   );
+}
+
+function luceneEscape(value) {
+  return String(value ?? '').replace(/[\\"]/g, '\\$&');
+}
+
+// Downloader tags often keep "feat. ..." in the title even though MusicBrainz
+// stores the base title. Try the exact title first, then the cleaned one.
+function titleVariants(title) {
+  const raw = String(title ?? '').trim();
+  if (!raw) return [];
+  const cleaned = raw
+    .replace(/\s*[([{]\s*(?:feat\.?|ft\.?|featuring)\s+[^)\]}]+[)\]}]\s*/gi, ' ')
+    .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.+$/i, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [...new Set([raw, cleaned].filter(Boolean))];
+}
+
+// A combined artist tag such as "Future & Metro Boomin" does not always match
+// MusicBrainz's artist field. Keep the full tag first, then try its first name.
+function artistVariants(artist) {
+  const raw = String(artist ?? '').trim();
+  if (!raw) return [];
+  const split = raw
+    .split(/\s*(?:[,;&|/]|\bfeat\.?\b|\bft\.?\b|\bwith\b|\band\b|\bx\b)\s*/i)
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return [...new Set([raw, ...split].filter(Boolean))];
+}
+
+function recordingQueries(title, artist, album) {
+  const titles = titleVariants(title);
+  const artists = artistVariants(artist);
+  if (!titles.length || !artists.length) return [];
+
+  const seen = new Set();
+  const queries = [];
+
+  // Bound the number of lookups so a tag with many featured artists cannot
+  // turn one song into a long chain of requests.
+  outer: for (const titleVariant of titles) {
+    for (const artistVariant of artists) {
+      if (queries.length >= 6) break outer;
+      const key = `${titleVariant}\u0000${artistVariant}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const parts = [
+        `recording:"${luceneEscape(titleVariant)}"`,
+        `artist:"${luceneEscape(artistVariant)}"`,
+      ];
+      if (album) parts.push(`release:"${luceneEscape(album)}"`);
+      queries.push(parts.join(' AND '));
+    }
+  }
+
+  return queries;
 }
 
 function releaseDate(release) {
@@ -395,41 +651,53 @@ async function findCoverForTrack(track) {
   const title = track.title;
   if (!artist || !title) return null;
 
-  const album =
-    track.albumTag && normalizeText(track.albumTag) !== normalizeText(track.folderName)
-      ? track.albumTag
-      : null;
-  const query = [`recording:"${title}"`, `artist:"${artist}"`];
-  if (album) query.push(`release:"${album}"`);
-
-  const search = await musicBrainzJson(
-    `/ws/2/recording/?query=${encodeURIComponent(query.join(' AND '))}&fmt=json&limit=5`,
-  );
-
-  const recordings = Array.isArray(search.recordings) ? search.recordings : [];
+  // A fake playlist album tag would filter out every real release, so only
+  // pass it to MusicBrainz when it looks like an actual album.
+  const album = track.albumIsPlaylistTag ? null : track.albumTag || null;
+  const queries = recordingQueries(title, artist, album);
   const releases = [];
   const seen = new Set();
-  for (const recording of recordings) {
-    for (const release of recording.releases ?? []) {
-      if (!release?.id || seen.has(release.id)) continue;
-      seen.add(release.id);
-      releases.push(release);
-    }
-  }
+  const tried = new Set();
 
-  for (const release of rankReleases(releases, album)) {
-    const cover = await coverFromRelease(release);
-    if (cover) return cover;
+  for (const query of queries) {
+    const search = await musicBrainzJson(
+      `/ws/2/recording/?query=${encodeURIComponent(query)}&fmt=json&limit=5`,
+    );
+
+    const recordings = Array.isArray(search.recordings) ? search.recordings : [];
+    let foundNewRelease = false;
+    for (const recording of recordings) {
+      for (const release of recording.releases ?? []) {
+        if (!release?.id || seen.has(release.id)) continue;
+        seen.add(release.id);
+        releases.push(release);
+        foundNewRelease = true;
+      }
+    }
+
+    if (!foundNewRelease) continue;
+
+    const candidates = rankReleases(
+      releases.filter((release) => !tried.has(release.id)),
+      album,
+    );
+    for (const release of candidates) {
+      tried.add(release.id);
+      const cover = await coverFromRelease(release);
+      if (cover) return cover;
+    }
   }
 
   if (!album) return null;
 
   const releaseSearch = await musicBrainzJson(
     `/ws/2/release/?query=${encodeURIComponent(
-      `release:"${album}" AND artist:"${artist}"`,
+      `release:"${luceneEscape(album)}" AND artist:"${luceneEscape(artist)}"`,
     )}&fmt=json&limit=5`,
   );
   for (const release of rankReleases(releaseSearch.releases ?? [], album)) {
+    if (!release?.id || tried.has(release.id)) continue;
+    tried.add(release.id);
     const cover = await coverFromRelease(release);
     if (cover) return cover;
   }
@@ -437,7 +705,7 @@ async function findCoverForTrack(track) {
   return null;
 }
 
-async function fetchMissingPlaylistCovers(playlists, tracks, byId) {
+async function fetchMissingPlaylistCovers(playlists, tracks, byId, onProgress = () => {}) {
   const manifest = await loadCoverManifest();
   // The media folder can be removed while the server is running, so make sure
   // it exists before writing any covers back into it.
@@ -458,11 +726,27 @@ async function fetchMissingPlaylistCovers(playlists, tracks, byId) {
   let skipped = 0;
   let missing = 0;
   let failed = 0;
+  let processed = 0;
   const changed = [];
+
+  const report = () =>
+    onProgress({
+      total: targets.size,
+      processed,
+      fetched,
+      linked,
+      skipped,
+      missing,
+      failed,
+    });
+
+  report();
 
   for (const [id, track] of targets) {
     if (cachedCover(id, manifest)) {
       skipped += 1;
+      processed += 1;
+      report();
       continue;
     }
 
@@ -471,12 +755,14 @@ async function fetchMissingPlaylistCovers(playlists, tracks, byId) {
     if (albumCover) {
       manifest.tracks[id] = { ...albumCover.entry };
       linked += 1;
+      processed += 1;
       changed.push({
         id,
         artwork: albumCover.url,
         artworkType: albumCover.type,
       });
       await saveCoverManifest();
+      report();
       continue;
     }
 
@@ -484,6 +770,8 @@ async function fetchMissingPlaylistCovers(playlists, tracks, byId) {
       const cover = await findCoverForTrack(track);
       if (!cover) {
         missing += 1;
+        processed += 1;
+        report();
         continue;
       }
 
@@ -505,13 +793,17 @@ async function fetchMissingPlaylistCovers(playlists, tracks, byId) {
       await saveCoverManifest();
       artworkCache.delete(id);
       fetched += 1;
+      processed += 1;
       changed.push({
         id,
         artwork: `/api/covers/${encodeURIComponent(file)}`,
         artworkType: cover.type,
       });
+      report();
     } catch {
       failed += 1;
+      processed += 1;
+      report();
     }
   }
 
@@ -642,6 +934,7 @@ async function readTrack(filePath, root, cache, nextCache, coverManifest) {
 
   const pictures = common.picture ?? [];
   const embeddedCover = pictures.find((item) => /front/i.test(item.type ?? '')) ?? pictures[0];
+  const embeddedArtwork = embeddedCover ? `/api/artwork/${id}` : null;
   const artist = common.artist?.trim() || common.albumartist?.trim() || 'Unknown artist';
   const taggedArtists = Array.isArray(common.artists)
     ? common.artists.map((name) => String(name ?? '').trim()).filter(Boolean)
@@ -666,17 +959,21 @@ async function readTrack(filePath, root, cache, nextCache, coverManifest) {
     trackNumber: Number.isFinite(common.track?.no) ? common.track.no : null,
     discNumber: Number.isFinite(common.disk?.no) ? common.disk.no : null,
     year: Number.isFinite(common.year) ? common.year : null,
+    embeddedArtwork,
+    embeddedArtworkType: embeddedCover?.format || 'image/jpeg',
     hasArtwork: false,
   };
 
-  const cover = cachedCoverForTrack(track, coverManifest);
-  track.hasArtwork = Boolean(cover || embeddedCover);
+  // Album covers are applied after playlist detection, once we know whether
+  // the album tag is a real release or a playlist collection name.
+  const cover = cachedCover(track.id, coverManifest);
+  track.hasArtwork = Boolean(cover || embeddedArtwork);
   if (cover) {
     track.artwork = cover.url;
     track.artworkType = cover.type;
-  } else if (embeddedCover) {
-    track.artwork = `/api/artwork/${id}`;
-    track.artworkType = embeddedCover.format || 'image/jpeg';
+  } else if (embeddedArtwork) {
+    track.artwork = embeddedArtwork;
+    track.artworkType = track.embeddedArtworkType;
   }
 
   nextCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, track });
@@ -748,11 +1045,13 @@ export function createLocalMusicPlugin() {
 
     cache = nextCache;
     const sortedTracks = sortTracks(tracks);
+    const playlists = buildFolderPlaylists(sortedTracks);
+    annotatePlaylistAlbums(sortedTracks, playlists, manifest);
 
     return {
       root,
       tracks: sortedTracks,
-      playlists: buildFolderPlaylists(sortedTracks),
+      playlists,
       byId,
       error: null,
       message: null,
@@ -899,9 +1198,22 @@ export function createLocalMusicPlugin() {
       return true;
     }
 
+    if (pathname === '/api/covers/fetch/status') {
+      sendJson(res, 200, coverFetchJob ?? { running: false });
+      return true;
+    }
+
     if (pathname === '/api/covers/fetch') {
       if (req.method !== 'POST') {
         sendError(res, 405, 'Use POST to fetch playlist covers.');
+        return true;
+      }
+
+      if (coverFetchJob?.running) {
+        sendJson(res, 409, {
+          ...coverFetchJob,
+          message: 'A cover fetch is already running.',
+        });
         return true;
       }
 
@@ -919,18 +1231,42 @@ export function createLocalMusicPlugin() {
         return true;
       }
 
+      const job = {
+        running: true,
+        total: 0,
+        processed: 0,
+        fetched: 0,
+        linked: 0,
+        skipped: 0,
+        missing: 0,
+        failed: 0,
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+      };
+      coverFetchJob = job;
+
       try {
         const result = await fetchMissingPlaylistCovers(
           library.playlists,
           library.tracks,
           library.byId,
+          (progress) => {
+            Object.assign(job, progress);
+          },
         );
         // Force the next scan to pick up the new cover paths.
         cache = new Map();
         artworkCache = new Map();
         lastScanAt = 0;
+        coverFetchJob = {
+          ...job,
+          running: false,
+          total: result.fetched + result.linked + result.skipped + result.missing + result.failed,
+          finishedAt: new Date().toISOString(),
+        };
         sendJson(res, 200, result);
       } catch {
+        coverFetchJob = { ...job, running: false, finishedAt: new Date().toISOString() };
         sendError(res, 500, 'Could not fetch playlist covers.');
       }
       return true;

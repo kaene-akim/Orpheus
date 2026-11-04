@@ -1,6 +1,6 @@
 import { formatTime } from '../utils/formatTime.js';
 import { albumAccentColor } from '../utils/albumColor.js';
-import { fetchPlaylistCovers } from '../services/libraryService.js';
+import { fetchPlaylistCovers, fetchPlaylistCoverStatus } from '../services/libraryService.js';
 
 const DEFAULT_ART = '/assets/images/default-album-art.svg';
 const SIDE_COVER_FILTER = 'saturate(0.6) brightness(0.85)';
@@ -1387,6 +1387,24 @@ export function renderPlayer(root, { store, audio, artwork }) {
     elements.fetchCovers.disabled = true;
     elements.coverStatus.textContent = 'Looking up missing playlist covers…';
 
+    // The first fetch can run for several minutes on a large playlist folder.
+    // Poll the server so the status line keeps moving instead of looking stuck.
+    let pollTimer = null;
+    const pollProgress = async () => {
+      try {
+        const status = await fetchPlaylistCoverStatus();
+        if (!status.total) return;
+        const progress = `${status.processed} of ${status.total}`;
+        elements.coverStatus.textContent = status.running
+          ? `Fetching covers… ${progress}`
+          : `Fetching covers… ${progress} · finishing up…`;
+      } catch {
+        // Progress is optional; the POST result still reports the outcome.
+      }
+    };
+    pollTimer = window.setInterval(pollProgress, 1200);
+    let reloading = false;
+
     try {
       const result = await fetchPlaylistCovers();
       const parts = [];
@@ -1399,6 +1417,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
         result.message || (parts.length ? parts.join(' · ') : 'No playlist covers were missing.');
 
       if (result.fetched > 0 || result.linked > 0) {
+        reloading = true;
         elements.coverStatus.textContent += ' Reloading…';
         window.setTimeout(() => window.location.reload(), 900);
         return;
@@ -1406,10 +1425,13 @@ export function renderPlayer(root, { store, audio, artwork }) {
     } catch (error) {
       elements.coverStatus.textContent =
         error instanceof Error ? error.message : 'Could not fetch playlist covers.';
+    } finally {
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+      if (!reloading) {
+        fetchingCovers = false;
+        elements.fetchCovers.disabled = false;
+      }
     }
-
-    fetchingCovers = false;
-    elements.fetchCovers.disabled = false;
   }
 
   elements.toggle.addEventListener('click', () => audio.toggle());

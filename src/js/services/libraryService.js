@@ -52,3 +52,17 @@ export async function fetchPlaylistCovers() {
 
   return response.json();
 }
+
+export async function fetchPlaylistCoverStatus() {
+  const response = await fetch('/api/covers/fetch/status', {
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!response.ok || !contentType.includes('application/json')) {
+    throw new Error('The local music server could not report cover progress.');
+  }
+
+  return response.json();
+}

@@ -287,15 +287,29 @@ artwork when they actually belong to an album. Open the gear icon and click
 - Replaces the displayed artwork even when the file has embedded art. Your
   audio files are never modified.
 
+Playlist downloads also tend to fake the album tag: every file may claim to be
+part of `Best of 2024 - Part 1` rather than the song's real album. Orpheus
+recognises these collection-style tags (from the folder name, playlist-style
+words such as "best of" or "hits", and shared album tags across unrelated
+artists) and ignores them during lookups. Those songs are matched individually
+instead of being forced into one fake album. Combined tags such as
+`BAND4BAND (feat. Lil Baby)` and `Clipse;Kendrick Lamar;Pusha T` are also
+retried with the featured artist and title decorations removed.
+
 Downloaded covers live in `media/covers/` next to the project, with a
 `manifest.json` index. Each image is named from its own content hash, so the
-same image is stored only once. Songs tagged as part of the same album share one
-cover entry; songs whose album tag is just the playlist folder name are treated
-as separate singles and looked up individually.
+same image is stored only once. Songs tagged as part of the same real album
+share one cover entry; songs whose album tag is just the playlist folder name
+are treated as separate singles and looked up individually. Downloader-style
+album artists such as `www.SongsLover.com` are ignored when grouping songs by
+album.
 
 The first fetch can take a while because MusicBrainz asks clients to make about
-one request per second. Set `ORPHEUS_MEDIA_DIR` to store the media folder
-somewhere else:
+one request per second. The settings panel shows progress while the lookup is
+running. MusicBrainz rate limits (`429`) and temporary server errors (`503` and
+other `5xx` responses) are retried with `Retry-After` support and exponential
+backoff, so a busy API does not leave gaps in the playlist. Set
+`ORPHEUS_MEDIA_DIR` to store the media folder somewhere else:
 
 ```bash
 ORPHEUS_MEDIA_DIR="/path/to/orpheus-media" npm run dev
