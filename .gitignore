@@ -1,5 +1,9 @@
 node_modules/
 
+# Downloaded cover art (kept locally, not part of the source)
+media/covers/*
+!media/covers/.gitkeep
+
 # Local environment and secrets
 .env
 .env.*

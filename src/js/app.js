@@ -17,6 +17,7 @@ app.innerHTML = `
 const library = await loadLocalLibrary();
 
 const store = createPlayerStore(library.tracks, {
+  folderPlaylists: library.playlists,
   libraryRoot: library.root,
   libraryError: library.error,
   libraryMessage: library.message,

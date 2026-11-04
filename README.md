@@ -12,6 +12,9 @@ with the project — you point Orpheus at your own music folder.
 
 - Reads music recursively from `~/Music` and any album subfolders inside it
 - Groups albums and artists from audio tags, falling back to folder names
+- Detects playlist folders automatically when a folder mixes songs from several albums
+- Fetches missing playlist covers from MusicBrainz and the Cover Art Archive
+- Stores downloaded covers locally and shares one file per album to avoid duplicates
 - Lists featured artists separately instead of creating a combined artist entry
 - Play, pause, previous, next, shuffle, and repeat (off / all / one)
 - Liked Songs queue with likes saved in the browser
@@ -188,6 +191,11 @@ the included placeholder image. Separate `cover.jpg` / `folder.png` files are
 not scanned at the moment — embed the artwork in the audio file if you want a
 custom cover.
 
+Playlist downloads often reuse one generic playlist cover for every song, or
+keep the wrong album art on singles. The cover fetcher in settings can replace
+that artwork with the real album or single cover without changing your files;
+see [Playlist folders and covers](#playlist-folders-and-covers).
+
 ## Production build
 
 ```bash
@@ -260,6 +268,44 @@ Playlists and likes are stored in the browser with `localStorage`; they are not
 written back to your music files. They are therefore specific to that browser
 and device.
 
+### Playlist folders and covers
+
+A folder is treated as a playlist automatically when its songs point at
+different albums. Orpheus also recognises large multi-artist folders with names
+such as `Best of 2024` or `Road Trip`. These folders appear in the **Playlists**
+tab with a **Playlist folder** label. Their songs are removed from the normal
+album list so a playlist does not create dozens of fake one-song albums.
+
+Songs in these folders often carry a generic playlist image, or a single's
+artwork when they actually belong to an album. Open the gear icon and click
+**Fetch album covers** to look up the real art. The command:
+
+- Only looks up songs in detected playlist folders.
+- Skips any cover that has already been downloaded.
+- Prefers the matching album release, then official singles and albums, and
+  avoids compilations and live releases.
+- Replaces the displayed artwork even when the file has embedded art. Your
+  audio files are never modified.
+
+Downloaded covers live in `media/covers/` next to the project, with a
+`manifest.json` index. Each image is named from its own content hash, so the
+same image is stored only once. Songs tagged as part of the same album share one
+cover entry; songs whose album tag is just the playlist folder name are treated
+as separate singles and looked up individually.
+
+The first fetch can take a while because MusicBrainz asks clients to make about
+one request per second. Set `ORPHEUS_MEDIA_DIR` to store the media folder
+somewhere else:
+
+```bash
+ORPHEUS_MEDIA_DIR="/path/to/orpheus-media" npm run dev
+```
+
+Cover lookups use the public MusicBrainz and Cover Art Archive APIs. For offline
+testing or a mirror, the following environment variables are also available:
+`ORPHEUS_MUSICBRAINZ_URL`, `ORPHEUS_COVERART_URL`, and
+`ORPHEUS_MUSICBRAINZ_INTERVAL_MS`.
+
 ### Search
 
 The search bar is in the top header.
@@ -280,8 +326,8 @@ Search only covers the local library. YouTube is used only through the explicit
 ### Settings
 
 Click the gear icon in the header to open settings. It contains the accent color
-picker, an **Album colors** toggle, a **Moving background** toggle, and a
-keyboard shortcut reference.
+picker, an **Album colors** toggle, a **Moving background** toggle, a **Fetch
+album covers** action, and a keyboard shortcut reference.
 
 **Album colors** is on by default. It samples the most prominent color from the
 current cover art and uses it for the accent and a soft background tint — even
@@ -292,6 +338,11 @@ use the toggle to turn them back on.
 The accent color and both toggles are applied immediately and saved in the
 browser. The background animation is also disabled automatically when your system
 requests reduced motion.
+
+**Fetch album covers** looks up artwork for detected playlist folders and
+reports how many covers were downloaded, matched to an existing album, already
+cached, or not found. It reloads the page after new artwork arrives. See
+[Playlist folders and covers](#playlist-folders-and-covers) for details.
 
 ## Keyboard shortcuts
 
@@ -333,6 +384,8 @@ Then reload the page.
 ## Project structure
 
 ```text
+media/
+└── covers/              # Downloaded playlist covers and manifest.json
 server/
 └── localMusicPlugin.js  # Recursive music scan, metadata, artwork, and media API
 public/
@@ -391,6 +444,17 @@ package.json
 
 Playlists only contain songs you add to them. Play the song and use the
 playlist button in the bottom-left control group to add it.
+
+### Fetch album covers does not find a song
+
+- Covers are only looked up for songs inside detected playlist folders. A normal
+  album folder keeps its embedded artwork.
+- Check your internet connection; MusicBrainz and the Cover Art Archive must be
+  reachable.
+- Very obscure releases, bootlegs, or badly tagged titles may not have a match.
+  Fixing the title and artist tags in the file usually helps.
+- Run the fetch again after adding music. Covers that were already downloaded
+  are skipped, so only new songs are looked up.
 
 ### The dev server port is already in use
 

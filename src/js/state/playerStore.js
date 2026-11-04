@@ -101,9 +101,12 @@ function sameCollection(left, right) {
 const QUEUE_HISTORY_LIMIT = 25;
 
 // The same album title can exist for different artists, so key albums by both.
-function buildCollections(library) {
+function buildCollections(library, folderPlaylists = []) {
   const albums = new Map();
   const artists = new Map();
+  const playlistTrackIds = new Set(
+    folderPlaylists.flatMap((playlist) => playlist.trackIds ?? []),
+  );
 
   library.forEach((track) => {
     if (!track || typeof track.id !== 'string') return;
@@ -128,6 +131,9 @@ function buildCollections(library) {
       artist.trackIds.push(track.id);
       if (!artist.artwork && track.artwork) artist.artwork = track.artwork;
     });
+
+    // Tracks that belong to a folder playlist are not separate albums.
+    if (playlistTrackIds.has(track.id)) return;
 
     const artistName = track.artist || 'Unknown artist';
     const albumArtistName = track.albumArtist || artistName;
@@ -170,6 +176,7 @@ export function createPlayerStore(
     storageKey = 'orpheus:player-prefs',
     playlistsKey = 'orpheus:playlists',
     likedKey = 'orpheus:liked',
+    folderPlaylists = [],
     libraryRoot = null,
     libraryError = null,
     libraryMessage = null,
@@ -177,7 +184,18 @@ export function createPlayerStore(
 ) {
   const library = [...initialTracks];
   const prefs = readPrefs(storageKey);
-  const { albums, artists } = buildCollections(library);
+  const automaticPlaylists = Array.isArray(folderPlaylists)
+    ? folderPlaylists
+        .filter(
+          (playlist) =>
+            playlist &&
+            typeof playlist.id === 'string' &&
+            typeof playlist.name === 'string' &&
+            Array.isArray(playlist.trackIds),
+        )
+        .map((playlist) => ({ ...playlist, type: 'playlist', automatic: true }))
+    : [];
+  const { albums, artists } = buildCollections(library, automaticPlaylists);
 
   let state = {
     // `tracks` / `currentIndex` are the playback queue. They only change when
@@ -191,6 +209,7 @@ export function createPlayerStore(
     libraryError,
     libraryMessage,
     playlists: readPlaylists(playlistsKey),
+    folderPlaylists: automaticPlaylists,
     albums,
     artists,
     likedIds: readLiked(likedKey),
@@ -325,7 +344,13 @@ export function createPlayerStore(
   }
 
   function findCollection(type, id) {
-    if (type === 'playlist') return state.playlists.find((item) => item.id === id) ?? null;
+    if (type === 'playlist') {
+      return (
+        state.playlists.find((item) => item.id === id) ??
+        state.folderPlaylists.find((item) => item.id === id) ??
+        null
+      );
+    }
     if (type === 'album') return state.albums.find((item) => item.id === id) ?? null;
     if (type === 'artist') return state.artists.find((item) => item.id === id) ?? null;
     return null;

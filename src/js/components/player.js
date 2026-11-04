@@ -1,5 +1,6 @@
 import { formatTime } from '../utils/formatTime.js';
 import { albumAccentColor } from '../utils/albumColor.js';
+import { fetchPlaylistCovers } from '../services/libraryService.js';
 
 const DEFAULT_ART = '/assets/images/default-album-art.svg';
 const SIDE_COVER_FILTER = 'saturate(0.6) brightness(0.85)';
@@ -214,6 +215,18 @@ export function renderPlayer(root, { store, audio, artwork }) {
               >
                 <span class="switch__thumb" aria-hidden="true"></span>
               </button>
+            </div>
+
+            <div class="settings__section">
+              <p class="settings__title">Playlist covers</p>
+              <p class="settings__hint">
+                Look up missing covers for songs in playlist folders on MusicBrainz. Covers that
+                were already fetched are skipped.
+              </p>
+              <button class="settings__action" type="button" data-fetch-covers>
+                Fetch album covers
+              </button>
+              <p class="settings__status" data-cover-status aria-live="polite"></p>
             </div>
 
             <div class="settings__section">
@@ -434,6 +447,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
     swatches: [...root.querySelectorAll('[data-accent-color]')],
     colorModeToggle: root.querySelector('[data-color-mode-toggle]'),
     motionToggle: root.querySelector('[data-motion-toggle]'),
+    fetchCovers: root.querySelector('[data-fetch-covers]'),
+    coverStatus: root.querySelector('[data-cover-status]'),
     searchForm: root.querySelector('[data-search-form]'),
     searchInput: root.querySelector('[data-search]'),
     like: root.querySelector('[data-like]'),
@@ -459,6 +474,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
   let colorRequestToken = 0;
   let carouselToken = 0;
   let carouselAnimations = [];
+  let fetchingCovers = false;
   let searchQuery = '';
   let sidebarOpen = false;
   let sidebarFilter = 'playlists';
@@ -1055,6 +1071,19 @@ export function renderPlayer(root, { store, audio, artwork }) {
       `;
     };
 
+    const folderPlaylistRow = (playlist) => {
+      const trackCount = playlist.trackIds.length;
+      return item({
+        type: 'playlist',
+        id: playlist.id,
+        name: playlist.name,
+        subtitle: `Playlist folder · ${trackCount} ${trackCount === 1 ? 'song' : 'songs'}`,
+        count: trackCount,
+        track: trackFor(playlist.trackIds),
+        iconName: 'playlist',
+      });
+    };
+
     let html = '';
 
     if (sidebarFilter === 'playlists') {
@@ -1083,7 +1112,11 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
       if (state.playlists.length) {
         html += state.playlists.map(playlistRow).join('');
-      } else {
+      }
+      if (state.folderPlaylists.length) {
+        html += state.folderPlaylists.map(folderPlaylistRow).join('');
+      }
+      if (!state.playlists.length && !state.folderPlaylists.length) {
         html += '<p class="sidebar__empty">No playlists yet. Create one below.</p>';
       }
     } else if (sidebarFilter === 'artists') {
@@ -1331,6 +1364,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
     const sidebarKey = `${sidebarFilter}|${collectionKey}|${state.playlists
       .map((playlist) => `${playlist.id}:${playlist.name}:${playlist.trackIds.join(',')}`)
+      .join('|')}|${state.folderPlaylists
+      .map((playlist) => `${playlist.id}:${playlist.name}:${playlist.trackIds.join(',')}`)
       .join('|')}|${state.albums.map((album) => album.id).join(',')}|${state.artists
       .map((artist) => artist.id)
       .join(',')}|${state.likedIds.join(',')}|${state.library.length}`;
@@ -1344,6 +1379,37 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
     elements.error.hidden = !error;
     elements.error.textContent = error ?? '';
+  }
+
+  async function fetchCovers() {
+    if (fetchingCovers) return;
+    fetchingCovers = true;
+    elements.fetchCovers.disabled = true;
+    elements.coverStatus.textContent = 'Looking up missing playlist covers…';
+
+    try {
+      const result = await fetchPlaylistCovers();
+      const parts = [];
+      if (result.fetched) parts.push(`${result.fetched} cover${result.fetched === 1 ? '' : 's'} fetched`);
+      if (result.linked) parts.push(`${result.linked} matched an existing album cover`);
+      if (result.skipped) parts.push(`${result.skipped} already cached`);
+      if (result.missing) parts.push(`${result.missing} not found`);
+      if (result.failed) parts.push(`${result.failed} failed`);
+      elements.coverStatus.textContent =
+        result.message || (parts.length ? parts.join(' · ') : 'No playlist covers were missing.');
+
+      if (result.fetched > 0 || result.linked > 0) {
+        elements.coverStatus.textContent += ' Reloading…';
+        window.setTimeout(() => window.location.reload(), 900);
+        return;
+      }
+    } catch (error) {
+      elements.coverStatus.textContent =
+        error instanceof Error ? error.message : 'Could not fetch playlist covers.';
+    }
+
+    fetchingCovers = false;
+    elements.fetchCovers.disabled = false;
   }
 
   elements.toggle.addEventListener('click', () => audio.toggle());
@@ -1374,6 +1440,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
   elements.motionToggle.addEventListener('click', () => store.toggleMovingBackground());
   elements.colorModeToggle.addEventListener('click', () => store.toggleDynamicColor());
+  elements.fetchCovers.addEventListener('click', () => fetchCovers());
 
   elements.settings.addEventListener('click', (event) => {
     const swatch = event.target.closest('[data-accent-color]');
