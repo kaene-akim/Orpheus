@@ -75,6 +75,37 @@ img {
   background: var(--panel);
 }
 
+.player.has-album-colors {
+  background:
+    radial-gradient(
+      130% 120% at 12% 0%,
+      color-mix(in srgb, var(--accent) 18%, #0b0b0d) 0%,
+      transparent 52%
+    ),
+    radial-gradient(
+      100% 100% at 100% 100%,
+      color-mix(in srgb, var(--accent) 10%, #0b0b0d) 0%,
+      transparent 58%
+    ),
+    var(--panel);
+}
+
+/* Keep the colored areas punchy and the surrounding shadows deep so the
+   background reads as moving color rather than one flat blur. */
+.player::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at 50% 44%,
+    transparent 26%,
+    rgba(3, 3, 5, 0.5) 72%,
+    rgba(3, 3, 5, 0.84) 100%
+  );
+}
+
 .ambient {
   position: absolute;
   inset: 0;
@@ -92,42 +123,49 @@ img {
 .ambient i {
   position: absolute;
   display: block;
-  width: 62vmax;
-  height: 62vmax;
+  width: 70vmax;
+  height: 70vmax;
   border-radius: 50%;
   background: radial-gradient(
     circle at center,
-    color-mix(in srgb, var(--accent) 70%, #7ee0d3),
+    color-mix(in srgb, var(--accent) 82%, #ffffff),
     transparent 68%
   );
-  filter: blur(72px);
-  opacity: 0.32;
-  animation: ambient-float 24s ease-in-out infinite alternate;
+  filter: blur(52px) saturate(1.25);
+  opacity: 0.58;
+  animation: ambient-float 10s ease-in-out infinite alternate;
+  will-change: transform;
 }
 
 .ambient i:nth-child(1) {
-  top: -30%;
-  left: -20%;
+  top: -34%;
+  left: -24%;
 }
 
 .ambient i:nth-child(2) {
-  top: -12%;
-  right: -26%;
-  animation-delay: -8s;
-  animation-duration: 29s;
+  top: -18%;
+  right: -28%;
+  animation-delay: -3s;
+  animation-duration: 13s;
+  animation-direction: alternate-reverse;
   background: radial-gradient(
     circle at center,
-    color-mix(in srgb, var(--accent) 58%, #ff8db3),
-    transparent 70%
+    color-mix(in srgb, var(--accent) 76%, #ff8db3),
+    transparent 69%
   );
 }
 
 .ambient i:nth-child(3) {
-  bottom: -38%;
-  left: 18%;
-  animation-delay: -15s;
-  animation-duration: 34s;
-  opacity: 0.24;
+  bottom: -42%;
+  left: 14%;
+  animation-delay: -7s;
+  animation-duration: 16s;
+  opacity: 0.48;
+  background: radial-gradient(
+    circle at center,
+    color-mix(in srgb, var(--accent) 74%, #7ee0d3),
+    transparent 70%
+  );
 }
 
 .player:not(.is-moving-background) .ambient i {
@@ -136,11 +174,11 @@ img {
 
 @keyframes ambient-float {
   from {
-    transform: translate3d(-4%, -3%, 0) scale(1);
+    transform: translate3d(-10%, -8%, 0) scale(0.9);
   }
 
   to {
-    transform: translate3d(7%, 6%, 0) scale(1.16);
+    transform: translate3d(13%, 11%, 0) scale(1.24);
   }
 }
 
@@ -848,11 +886,33 @@ img {
 }
 
 .cover-flow {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   width: var(--stage-width);
   margin: auto auto 0;
+}
+
+.cover-flow__transition {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.cover-flow__clone {
+  position: absolute;
+  display: block;
+  border: 1px solid var(--border);
+  background: #0a0a0c;
+  object-fit: cover;
+  will-change: transform, opacity;
+}
+
+.cover-flow.is-carousel-moving .cover-flow__side img,
+.cover-flow.is-carousel-moving .artwork-frame__image {
+  opacity: 0;
 }
 
 .cover-flow__side {

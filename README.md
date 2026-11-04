@@ -22,7 +22,9 @@ with the project — you point Orpheus at your own music folder.
 - Search the active collection first, then the rest of the library
 - Press `Enter` to play the first local result, or `Shift` + `Enter` to search YouTube
 - Embedded cover art (for example, artwork stored inside MP3 files)
-- Accent color picker and a toggleable moving background in the settings panel
+- Album colors that match the accent and background to the current cover art
+- Accent color picker and a fast, high-contrast moving background in settings
+- Carousel animation that slides the current cover into place on next / previous
 - Keyboard shortcuts and Media Session support for OS playback controls
 - Full-screen layout with a fixed stage and an independently scrolling queue
 
@@ -210,6 +212,8 @@ The bottom control bar contains:
 
 The progress slider sits just above the control bar. Click or drag it to seek.
 The previous and next cover images beside the main artwork are also clickable.
+Skipping with the next / previous buttons, the side covers, or the `N` / `P`
+keys slides the active cover into its new carousel position.
 
 ### The queue
 
@@ -276,8 +280,16 @@ Search only covers the local library. YouTube is used only through the explicit
 ### Settings
 
 Click the gear icon in the header to open settings. It contains the accent color
-picker, a **Moving background** toggle, and a keyboard shortcut reference. The
-accent color and background setting are applied immediately and saved in the
+picker, an **Album colors** toggle, a **Moving background** toggle, and a
+keyboard shortcut reference.
+
+**Album colors** is on by default. It samples the most prominent color from the
+current cover art and uses it for the accent and a soft background tint — even
+when the moving background is off. Covers without a usable color keep your chosen
+accent. Picking an accent swatch turns album colors off so your choice stays put;
+use the toggle to turn them back on.
+
+The accent color and both toggles are applied immediately and saved in the
 browser. The background animation is also disabled automatically when your system
 requests reduced motion.
 
@@ -304,7 +316,7 @@ Orpheus uses these `localStorage` keys:
 
 | Key | Contents |
 | --- | --- |
-| `orpheus:player-prefs` | Volume, mute, shuffle, repeat, and accent color |
+| `orpheus:player-prefs` | Volume, mute, shuffle, repeat, accent color, album colors, and moving background |
 | `orpheus:playlists` | Playlist names and their track IDs |
 | `orpheus:liked` | Liked track IDs |
 

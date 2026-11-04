@@ -9,6 +9,7 @@ const DEFAULT_PREFS = {
   repeat: 'off',
   accent: '#b49cff',
   movingBackground: true,
+  dynamicColor: true,
 };
 
 function clamp(value, min, max) {
@@ -42,6 +43,8 @@ function readPrefs(storageKey) {
         typeof stored.movingBackground === 'boolean'
           ? stored.movingBackground
           : DEFAULT_PREFS.movingBackground,
+      dynamicColor:
+        typeof stored.dynamicColor === 'boolean' ? stored.dynamicColor : DEFAULT_PREFS.dynamicColor,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -201,6 +204,7 @@ export function createPlayerStore(
     currentTime: 0,
     duration: 0,
     error: null,
+    albumAccent: null,
     ...prefs,
   };
 
@@ -218,10 +222,10 @@ export function createPlayerStore(
 
   function persistPrefs() {
     try {
-      const { volume, muted, shuffle, repeat, accent, movingBackground } = state;
+      const { volume, muted, shuffle, repeat, accent, movingBackground, dynamicColor } = state;
       window.localStorage.setItem(
         storageKey,
-        JSON.stringify({ volume, muted, shuffle, repeat, accent, movingBackground }),
+        JSON.stringify({ volume, muted, shuffle, repeat, accent, movingBackground, dynamicColor }),
       );
     } catch {
       // Storage can be unavailable (private mode, blocked cookies); playback still works.
@@ -246,7 +250,11 @@ export function createPlayerStore(
 
   function setState(patch) {
     state = { ...state, ...patch };
-    if (['volume', 'muted', 'shuffle', 'repeat', 'accent', 'movingBackground'].some((key) => key in patch)) {
+    if (
+      ['volume', 'muted', 'shuffle', 'repeat', 'accent', 'movingBackground', 'dynamicColor'].some(
+        (key) => key in patch,
+      )
+    ) {
       persistPrefs();
     }
     if ('playlists' in patch) {
@@ -713,10 +721,19 @@ export function createPlayerStore(
     },
     setAccent(color) {
       if (!isUsableAccent(color)) return;
-      setState({ accent: color.toLowerCase() });
+      // A manual color choice takes over from the cover art.
+      setState({ accent: color.toLowerCase(), dynamicColor: false });
+    },
+    setAlbumAccent(color) {
+      if (color !== null && !isUsableAccent(color)) return;
+      const nextColor = color === null ? null : color.toLowerCase();
+      if (nextColor !== state.albumAccent) setState({ albumAccent: nextColor });
     },
     toggleMovingBackground() {
       setState({ movingBackground: !state.movingBackground });
+    },
+    toggleDynamicColor() {
+      setState({ dynamicColor: !state.dynamicColor });
     },
   };
 }

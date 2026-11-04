@@ -1,6 +1,8 @@
 import { formatTime } from '../utils/formatTime.js';
+import { albumAccentColor } from '../utils/albumColor.js';
 
 const DEFAULT_ART = '/assets/images/default-album-art.svg';
+const SIDE_COVER_FILTER = 'saturate(0.6) brightness(0.85)';
 
 const SIDEBAR_FILTERS = [
   { id: 'playlists', label: 'Playlists' },
@@ -179,8 +181,28 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
             <div class="settings__section settings__row">
               <div>
+                <p class="settings__title">Album colors</p>
+                <p class="settings__hint">
+                  Match accents and the background to the current cover. Choosing a swatch turns
+                  this off.
+                </p>
+              </div>
+              <button
+                class="switch"
+                type="button"
+                role="switch"
+                aria-checked="true"
+                aria-label="Album colors"
+                data-color-mode-toggle
+              >
+                <span class="switch__thumb" aria-hidden="true"></span>
+              </button>
+            </div>
+
+            <div class="settings__section settings__row">
+              <div>
                 <p class="settings__title">Moving background</p>
-                <p class="settings__hint">A slow animated color wash behind the player.</p>
+                <p class="settings__hint">An animated color wash behind the player.</p>
               </div>
               <button
                 class="switch"
@@ -215,7 +237,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
       <div class="player__body">
         <section class="now-playing" aria-label="Now playing">
-          <div class="cover-flow">
+          <div class="cover-flow" data-cover-flow>
+            <div class="cover-flow__transition" data-cover-transition aria-hidden="true"></div>
             <button
               class="cover-flow__side cover-flow__side--prev"
               type="button"
@@ -382,6 +405,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
     artwork: root.querySelector('[data-artwork]'),
     prevCover: root.querySelector('[data-prev-cover]'),
     nextCover: root.querySelector('[data-next-cover]'),
+    coverFlow: root.querySelector('[data-cover-flow]'),
+    coverTransition: root.querySelector('[data-cover-transition]'),
     prevArtwork: root.querySelector('[data-prev-artwork]'),
     nextArtwork: root.querySelector('[data-next-artwork]'),
     album: root.querySelector('[data-album]'),
@@ -407,6 +432,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
     settingsToggle: root.querySelector('[data-settings-toggle]'),
     settings: root.querySelector('[data-settings]'),
     swatches: [...root.querySelectorAll('[data-accent-color]')],
+    colorModeToggle: root.querySelector('[data-color-mode-toggle]'),
     motionToggle: root.querySelector('[data-motion-toggle]'),
     searchForm: root.querySelector('[data-search-form]'),
     searchInput: root.querySelector('[data-search]'),
@@ -429,6 +455,10 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
   let isSeeking = false;
   let appliedAccent = null;
+  let colorRequestSrc = null;
+  let colorRequestToken = 0;
+  let carouselToken = 0;
+  let carouselAnimations = [];
   let searchQuery = '';
   let sidebarOpen = false;
   let sidebarFilter = 'playlists';
@@ -492,6 +522,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
     if (state.currentTrack?.id === track.id) {
       setImage(elements.artwork, artworkFor(track), `${track.album} — album artwork`);
+      syncAlbumColor();
     }
 
     if (state.tracks.length > 1) {
@@ -508,6 +539,161 @@ export function renderPlayer(root, { store, audio, artwork }) {
     root.querySelectorAll('img[data-art-track]').forEach((image) => {
       if (image.dataset.artTrack === track.id) setImage(image, artworkFor(track), '');
     });
+  }
+
+  // Pull the current cover's accent out asynchronously, then let the store
+  // trigger a normal update. The manual accent stays intact for when album
+  // colors are turned off again.
+  function syncAlbumColor() {
+    const state = store.getState();
+    if (!state.dynamicColor) {
+      colorRequestSrc = null;
+      return;
+    }
+
+    const track = state.currentTrack;
+    if (!track) return;
+
+    const src = artworkFor(track);
+    if (!src || src === DEFAULT_ART) {
+      store.setAlbumAccent(null);
+      return;
+    }
+
+    if (src === colorRequestSrc) return;
+    colorRequestSrc = src;
+    const token = ++colorRequestToken;
+
+    albumAccentColor(src).then((color) => {
+      if (token !== colorRequestToken) return;
+      if (!store.getState().dynamicColor) return;
+      store.setAlbumAccent(color);
+    });
+  }
+
+  function measureCover(image) {
+    const frame = elements.coverFlow.getBoundingClientRect();
+    const rect = image.getBoundingClientRect();
+    return {
+      left: rect.left - frame.left,
+      top: rect.top - frame.top,
+      width: rect.width,
+      height: rect.height,
+      centerX: rect.left + rect.width / 2 - frame.left,
+      centerY: rect.top + rect.height / 2 - frame.top,
+      src: image.getAttribute('src') ?? '',
+      radius: image === elements.artwork ? 16 : 12,
+    };
+  }
+
+  function captureCoverFlow() {
+    if (
+      !elements.coverFlow ||
+      !elements.artwork?.getAttribute('src') ||
+      elements.prevCover.hidden ||
+      elements.nextCover.hidden
+    ) {
+      return null;
+    }
+
+    return {
+      main: measureCover(elements.artwork),
+      previous: measureCover(elements.prevArtwork),
+      next: measureCover(elements.nextArtwork),
+    };
+  }
+
+  function createCoverClone(cover, opacity, filter, zIndex) {
+    const image = document.createElement('img');
+    image.className = 'cover-flow__clone';
+    image.src = cover.src;
+    image.alt = '';
+    image.style.left = `${cover.left}px`;
+    image.style.top = `${cover.top}px`;
+    image.style.width = `${cover.width}px`;
+    image.style.height = `${cover.height}px`;
+    image.style.borderRadius = `${cover.radius}px`;
+    image.style.opacity = String(opacity);
+    image.style.filter = filter;
+    image.style.zIndex = String(zIndex);
+    return image;
+  }
+
+  function animateCoverChange(direction, snapshot) {
+    if (!snapshot || !elements.coverTransition) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    const incomingCover = direction === 'next' ? snapshot.next : snapshot.previous;
+    const outgoingCover = direction === 'next' ? snapshot.previous : snapshot.next;
+    if (!incomingCover.src || !outgoingCover.src) return;
+
+    const flow = elements.coverFlow;
+    const layer = elements.coverTransition;
+    const token = ++carouselToken;
+
+    carouselAnimations.forEach((animation) => animation.cancel());
+    carouselAnimations = [];
+    layer.replaceChildren();
+    flow.classList.add('is-carousel-moving');
+
+    const outgoingClone = createCoverClone(snapshot.main, 1, 'none', 1);
+    const incomingClone = createCoverClone(incomingCover, 0.42, SIDE_COVER_FILTER, 2);
+    layer.append(outgoingClone, incomingClone);
+
+    const animate = (clone, from, to, fromOpacity, toOpacity, fromFilter, toFilter) => {
+      const scaleX = to.width / from.width;
+      const scaleY = to.height / from.height;
+      return clone.animate(
+        [
+          {
+            transform: 'translate(0, 0) scale(1)',
+            borderRadius: `${from.radius}px`,
+            opacity: fromOpacity,
+            filter: fromFilter,
+          },
+          {
+            transform: `translate(${to.centerX - from.centerX}px, ${
+              to.centerY - from.centerY
+            }px) scale(${scaleX}, ${scaleY})`,
+            borderRadius: `${to.radius}px`,
+            opacity: toOpacity,
+            filter: toFilter,
+          },
+        ],
+        {
+          duration: 460,
+          easing: 'cubic-bezier(0.22, 0.9, 0.28, 1)',
+          fill: 'both',
+        },
+      );
+    };
+
+    carouselAnimations = [
+      animate(outgoingClone, snapshot.main, outgoingCover, 1, 0.42, 'none', SIDE_COVER_FILTER),
+      animate(incomingClone, incomingCover, snapshot.main, 0.42, 1, SIDE_COVER_FILTER, 'none'),
+    ];
+
+    Promise.all(carouselAnimations.map((animation) => animation.finished.catch(() => {}))).then(
+      () => {
+        if (token !== carouselToken) return;
+        layer.replaceChildren();
+        flow.classList.remove('is-carousel-moving');
+        carouselAnimations = [];
+      },
+    );
+  }
+
+  function carouselStep(direction) {
+    const state = store.getState();
+    const beforeId = state.currentTrack?.id ?? null;
+    const snapshot = captureCoverFlow();
+
+    if (direction === 'next') audio.next();
+    else audio.previous();
+
+    const afterId = store.getState().currentTrack?.id ?? null;
+    if (afterId === beforeId) return;
+    animateCoverChange(direction, snapshot);
   }
 
   function syncLike() {
@@ -1013,7 +1199,9 @@ export function renderPlayer(root, { store, audio, artwork }) {
       shuffle,
       repeat,
       accent,
+      albumAccent,
       movingBackground,
+      dynamicColor,
       error,
       canGoBack,
     } = state;
@@ -1023,13 +1211,15 @@ export function renderPlayer(root, { store, audio, artwork }) {
     state.tracks.forEach((track) => trackLookup.set(track.id, track));
     state.displayedTracks.forEach((track) => trackLookup.set(track.id, track));
 
-    if (accent !== appliedAccent) {
-      document.documentElement.style.setProperty('--accent', accent);
-      appliedAccent = accent;
+    const activeAccent = dynamicColor && albumAccent ? albumAccent : accent;
+    if (activeAccent !== appliedAccent) {
+      document.documentElement.style.setProperty('--accent', activeAccent);
+      appliedAccent = activeAccent;
     }
 
     elements.swatches.forEach((swatch) => {
-      const selected = swatch.dataset.accentColor.toLowerCase() === accent.toLowerCase();
+      const selected =
+        !dynamicColor && swatch.dataset.accentColor.toLowerCase() === accent.toLowerCase();
       swatch.classList.toggle('is-selected', selected);
       swatch.setAttribute('aria-pressed', String(selected));
     });
@@ -1048,6 +1238,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
       elements.artist.textContent = '';
       document.title = 'Orpheus';
     }
+
+    syncAlbumColor();
 
     const hasSiblings = tracks.length > 1;
     elements.prevCover.hidden = !hasSiblings;
@@ -1090,6 +1282,12 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
     player.classList.toggle('is-playing', isPlaying);
     player.classList.toggle('is-moving-background', movingBackground);
+    player.classList.toggle('has-album-colors', dynamicColor);
+    elements.colorModeToggle.setAttribute('aria-checked', String(dynamicColor));
+    elements.colorModeToggle.setAttribute(
+      'aria-label',
+      `Album colors: ${dynamicColor ? 'on' : 'off'}`,
+    );
     elements.motionToggle.setAttribute('aria-checked', String(movingBackground));
     elements.motionToggle.setAttribute(
       'aria-label',
@@ -1149,10 +1347,10 @@ export function renderPlayer(root, { store, audio, artwork }) {
   }
 
   elements.toggle.addEventListener('click', () => audio.toggle());
-  elements.previous.addEventListener('click', () => audio.previous());
-  elements.next.addEventListener('click', () => audio.next());
-  elements.prevCover.addEventListener('click', () => audio.previous());
-  elements.nextCover.addEventListener('click', () => audio.next());
+  elements.previous.addEventListener('click', () => carouselStep('previous'));
+  elements.next.addEventListener('click', () => carouselStep('next'));
+  elements.prevCover.addEventListener('click', () => carouselStep('previous'));
+  elements.nextCover.addEventListener('click', () => carouselStep('next'));
 
   // Dragging artwork creates a ghost image that follows the pointer on some
   // browsers. Artwork is decorative, so never start a native drag.
@@ -1175,6 +1373,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
   });
 
   elements.motionToggle.addEventListener('click', () => store.toggleMovingBackground());
+  elements.colorModeToggle.addEventListener('click', () => store.toggleDynamicColor());
 
   elements.settings.addEventListener('click', (event) => {
     const swatch = event.target.closest('[data-accent-color]');
@@ -1444,10 +1643,10 @@ export function renderPlayer(root, { store, audio, artwork }) {
         adjustVolume(-0.05);
         break;
       case 'KeyN':
-        audio.next();
+        carouselStep('next');
         break;
       case 'KeyP':
-        audio.previous();
+        carouselStep('previous');
         break;
       case 'KeyM':
         store.toggleMute();
@@ -1504,6 +1703,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
     unsubscribe();
     unsubscribeArtwork();
     if (artObserver) artObserver.disconnect();
+    carouselAnimations.forEach((animation) => animation.cancel());
+    carouselAnimations = [];
     document.removeEventListener('keydown', handleKeydown);
     document.removeEventListener('click', handleDocumentClick);
     window.removeEventListener('pointerup', handlePointerUp);
