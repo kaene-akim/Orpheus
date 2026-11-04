@@ -1,3 +1,5 @@
+import { splitArtistNames } from '../utils/artistNames.js';
+
 const REPEAT_MODES = ['off', 'all', 'one'];
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 const DEFAULT_PREFS = {
@@ -6,6 +8,7 @@ const DEFAULT_PREFS = {
   shuffle: false,
   repeat: 'off',
   accent: '#b49cff',
+  movingBackground: true,
 };
 
 function clamp(value, min, max) {
@@ -35,6 +38,10 @@ function readPrefs(storageKey) {
       shuffle: typeof stored.shuffle === 'boolean' ? stored.shuffle : DEFAULT_PREFS.shuffle,
       repeat: REPEAT_MODES.includes(stored.repeat) ? stored.repeat : DEFAULT_PREFS.repeat,
       accent: isUsableAccent(stored.accent) ? stored.accent.toLowerCase() : DEFAULT_PREFS.accent,
+      movingBackground:
+        typeof stored.movingBackground === 'boolean'
+          ? stored.movingBackground
+          : DEFAULT_PREFS.movingBackground,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -98,24 +105,30 @@ function buildCollections(library) {
   library.forEach((track) => {
     if (!track || typeof track.id !== 'string') return;
 
+    const artistNames = splitArtistNames(
+      Array.isArray(track.artists) && track.artists.length ? track.artists : track.artist,
+    );
+
+    artistNames.forEach((artistName) => {
+      let artist = artists.get(artistName);
+      if (!artist) {
+        artist = {
+          id: `artist:${encodeIdPart(artistName)}`,
+          type: 'artist',
+          name: artistName,
+          trackIds: [],
+          trackId: track.id,
+          artwork: track.artwork ?? null,
+        };
+        artists.set(artistName, artist);
+      }
+      artist.trackIds.push(track.id);
+      if (!artist.artwork && track.artwork) artist.artwork = track.artwork;
+    });
+
     const artistName = track.artist || 'Unknown artist';
     const albumArtistName = track.albumArtist || artistName;
     const albumName = track.album || 'Unknown album';
-
-    let artist = artists.get(artistName);
-    if (!artist) {
-      artist = {
-        id: `artist:${encodeIdPart(artistName)}`,
-        type: 'artist',
-        name: artistName,
-        trackIds: [],
-        trackId: track.id,
-        artwork: track.artwork ?? null,
-      };
-      artists.set(artistName, artist);
-    }
-    artist.trackIds.push(track.id);
-    if (!artist.artwork && track.artwork) artist.artwork = track.artwork;
 
     const albumKey = `${albumArtistName}\u0000${albumName}`;
     let album = albums.get(albumKey);
@@ -205,8 +218,11 @@ export function createPlayerStore(
 
   function persistPrefs() {
     try {
-      const { volume, muted, shuffle, repeat, accent } = state;
-      window.localStorage.setItem(storageKey, JSON.stringify({ volume, muted, shuffle, repeat, accent }));
+      const { volume, muted, shuffle, repeat, accent, movingBackground } = state;
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({ volume, muted, shuffle, repeat, accent, movingBackground }),
+      );
     } catch {
       // Storage can be unavailable (private mode, blocked cookies); playback still works.
     }
@@ -230,7 +246,7 @@ export function createPlayerStore(
 
   function setState(patch) {
     state = { ...state, ...patch };
-    if (['volume', 'muted', 'shuffle', 'repeat', 'accent'].some((key) => key in patch)) {
+    if (['volume', 'muted', 'shuffle', 'repeat', 'accent', 'movingBackground'].some((key) => key in patch)) {
       persistPrefs();
     }
     if ('playlists' in patch) {
@@ -698,6 +714,9 @@ export function createPlayerStore(
     setAccent(color) {
       if (!isUsableAccent(color)) return;
       setState({ accent: color.toLowerCase() });
+    },
+    toggleMovingBackground() {
+      setState({ movingBackground: !state.movingBackground });
     },
   };
 }

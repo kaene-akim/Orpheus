@@ -68,7 +68,8 @@ function isEditableTarget(target) {
 }
 
 function trackHaystack(track) {
-  return `${track.title} ${track.artist} ${track.album}`.toLowerCase();
+  const artists = Array.isArray(track.artists) ? track.artists.join(' ') : '';
+  return `${track.title} ${track.artist} ${artists} ${track.album}`.toLowerCase();
 }
 
 export function renderPlayer(root, { store, audio, artwork }) {
@@ -80,6 +81,10 @@ export function renderPlayer(root, { store, audio, artwork }) {
 
   root.innerHTML = `
     <section class="player" data-player aria-label="Orpheus music player">
+      <div class="ambient" data-ambient aria-hidden="true">
+        <i></i><i></i><i></i>
+      </div>
+
       <div class="sidebar-backdrop" data-sidebar-backdrop></div>
 
       <aside class="sidebar" id="playlists-sidebar" data-sidebar aria-hidden="true" aria-label="Your library">
@@ -141,10 +146,6 @@ export function renderPlayer(root, { store, audio, artwork }) {
         </form>
 
         <div class="header-actions">
-          <span class="status" data-status>
-            <span class="status__dot" aria-hidden="true"></span>
-            <span data-status-label>Ready</span>
-          </span>
           <button
             class="icon-button"
             type="button"
@@ -174,6 +175,23 @@ export function renderPlayer(root, { store, audio, artwork }) {
                   ></button>
                 `,
               ).join('')}
+            </div>
+
+            <div class="settings__section settings__row">
+              <div>
+                <p class="settings__title">Moving background</p>
+                <p class="settings__hint">A slow animated color wash behind the player.</p>
+              </div>
+              <button
+                class="switch"
+                type="button"
+                role="switch"
+                aria-checked="true"
+                aria-label="Moving background"
+                data-motion-toggle
+              >
+                <span class="switch__thumb" aria-hidden="true"></span>
+              </button>
             </div>
 
             <div class="settings__section">
@@ -385,12 +403,11 @@ export function renderPlayer(root, { store, audio, artwork }) {
     queueTitle: root.querySelector('[data-queue-title]'),
     queueBack: root.querySelector('[data-queue-back]'),
     count: root.querySelector('[data-count]'),
-    status: root.querySelector('[data-status]'),
-    statusLabel: root.querySelector('[data-status-label]'),
     error: root.querySelector('[data-error]'),
     settingsToggle: root.querySelector('[data-settings-toggle]'),
     settings: root.querySelector('[data-settings]'),
     swatches: [...root.querySelectorAll('[data-accent-color]')],
+    motionToggle: root.querySelector('[data-motion-toggle]'),
     searchForm: root.querySelector('[data-search-form]'),
     searchInput: root.querySelector('[data-search]'),
     like: root.querySelector('[data-like]'),
@@ -996,6 +1013,7 @@ export function renderPlayer(root, { store, audio, artwork }) {
       shuffle,
       repeat,
       accent,
+      movingBackground,
       error,
       canGoBack,
     } = state;
@@ -1071,8 +1089,12 @@ export function renderPlayer(root, { store, audio, artwork }) {
     elements.toggle.setAttribute('title', isPlaying ? 'Pause' : 'Play');
 
     player.classList.toggle('is-playing', isPlaying);
-    elements.status.classList.toggle('is-playing', isPlaying);
-    elements.statusLabel.textContent = isPlaying ? 'Playing' : currentTime > 0 ? 'Paused' : 'Ready';
+    player.classList.toggle('is-moving-background', movingBackground);
+    elements.motionToggle.setAttribute('aria-checked', String(movingBackground));
+    elements.motionToggle.setAttribute(
+      'aria-label',
+      `Moving background: ${movingBackground ? 'on' : 'off'}`,
+    );
 
     elements.shuffle.classList.toggle('is-active', shuffle);
     elements.shuffle.setAttribute('aria-pressed', String(shuffle));
@@ -1151,6 +1173,8 @@ export function renderPlayer(root, { store, audio, artwork }) {
   elements.settingsToggle.addEventListener('click', () => {
     setSettingsOpen(elements.settings.hidden);
   });
+
+  elements.motionToggle.addEventListener('click', () => store.toggleMovingBackground());
 
   elements.settings.addEventListener('click', (event) => {
     const swatch = event.target.closest('[data-accent-color]');

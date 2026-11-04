@@ -169,11 +169,18 @@ async function readTrack(filePath, root, cache, nextCache) {
 
   const pictures = common.picture ?? [];
   const cover = pictures.find((item) => /front/i.test(item.type ?? '')) ?? pictures[0];
+  const artist = common.artist?.trim() || common.albumartist?.trim() || 'Unknown artist';
+  const taggedArtists = Array.isArray(common.artists)
+    ? common.artists.map((name) => String(name ?? '').trim()).filter(Boolean)
+    : [];
 
   const track = {
     id,
     title: common.title?.trim() || path.basename(filePath, extensionOf(filePath)),
-    artist: common.artist?.trim() || common.albumartist?.trim() || 'Unknown artist',
+    artist,
+    // Keep the exact tag around so the client can split combined feature
+    // strings without losing the display name.
+    artists: taggedArtists.length ? [...new Set(taggedArtists)] : [artist],
     albumArtist:
       common.albumartist?.trim() || common.artist?.trim() || 'Unknown artist',
     album: common.album?.trim() || folderName || 'Unknown album',

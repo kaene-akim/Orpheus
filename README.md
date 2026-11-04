@@ -12,6 +12,7 @@ with the project — you point Orpheus at your own music folder.
 
 - Reads music recursively from `~/Music` and any album subfolders inside it
 - Groups albums and artists from audio tags, falling back to folder names
+- Lists featured artists separately instead of creating a combined artist entry
 - Play, pause, previous, next, shuffle, and repeat (off / all / one)
 - Liked Songs queue with likes saved in the browser
 - Playlist sidebar with an independent queue for every playlist
@@ -21,7 +22,7 @@ with the project — you point Orpheus at your own music folder.
 - Search the active collection first, then the rest of the library
 - Press `Enter` to play the first local result, or `Shift` + `Enter` to search YouTube
 - Embedded cover art (for example, artwork stored inside MP3 files)
-- Accent color picker in the settings panel
+- Accent color picker and a toggleable moving background in the settings panel
 - Keyboard shortcuts and Media Session support for OS playback controls
 - Full-screen layout with a fixed stage and an independently scrolling queue
 
@@ -174,6 +175,12 @@ Album grouping uses the album artist and album title when tags are present.
 Keeping files in properly named album folders is still a good idea, because the
 folder name is used when a file has no album tag.
 
+When a song credits several artists, Orpheus lists it under each artist. It uses
+the file's multi-value artist tags when available and also splits common combined
+tags such as `Artist A feat. Artist B`, `Artist A; Artist B`, and `Artist A with
+Artist B`. The song itself keeps its original combined artist text in the player
+and queue.
+
 Embedded cover art is displayed automatically. Files without embedded art use
 the included placeholder image. Separate `cover.jpg` / `folder.png` files are
 not scanned at the moment — embed the artwork in the audio file if you want a
@@ -269,8 +276,10 @@ Search only covers the local library. YouTube is used only through the explicit
 ### Settings
 
 Click the gear icon in the header to open settings. It contains the accent color
-picker and a keyboard shortcut reference. Accent colors are applied immediately
-and saved in the browser.
+picker, a **Moving background** toggle, and a keyboard shortcut reference. The
+accent color and background setting are applied immediately and saved in the
+browser. The background animation is also disabled automatically when your system
+requests reduced motion.
 
 ## Keyboard shortcuts
 
