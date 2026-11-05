@@ -22,6 +22,12 @@ with the project — you point Orpheus at your own music folder.
 - Clicking a playlist, album, artist, or Liked Songs only changes the visible
   queue — it never starts playback by itself
 - Queue back button (`<`) that returns to the previous queue
+- Separate **User queue** tab with drag-and-drop reordering, play-next, and clear
+- Right-click menus for songs, cover art, and playlists, plus a searchable song picker
+- Synced lyrics from LRCLIB in fullscreen, with seek-on-line and auto-scroll
+- Plain-text lyrics fallback from Lyrics.ovh when LRCLIB has no match or times out
+- Lyrics appearance controls: 90+ local typefaces, size, weight, spacing, color,
+  dynamic accent color, and a panel width that can fill the whole player
 - Search the active collection first, then the rest of the library
 - Press `Enter` to play the first local result, or `Shift` + `Enter` to search YouTube
 - Embedded cover art (for example, artwork stored inside MP3 files)
@@ -74,6 +80,61 @@ with the project — you point Orpheus at your own music folder.
 Orpheus must be started with `npm run dev` or `npm run preview`. A plain static
 file server is not enough, because a small local API is used to scan the music
 folder and stream audio files to the browser.
+
+### Open from a desktop launcher (Linux, optional)
+
+Instead of opening a terminal every time, create a wrapper that starts the dev
+server only when it is not already running, then opens the app. Save it as
+`~/.local/bin/orpheus` and make it executable (`chmod +x`):
+
+```bash
+#!/usr/bin/env bash
+set -u
+APP_DIR="$HOME/Orpheus"
+URL="http://localhost:5173/"
+mkdir -p "$HOME/.cache"
+
+if ! curl -fsS --max-time 1 "$URL" >/dev/null 2>&1; then
+  cd "$APP_DIR" || exit 1
+  nohup npm run dev -- --host 127.0.0.1 >"$HOME/.cache/orpheus-dev.log" 2>&1 &
+  for _ in $(seq 1 60); do
+    curl -fsS --max-time 1 "$URL" >/dev/null 2>&1 && break
+    sleep 0.25
+  done
+fi
+
+xdg-open "$URL" >/dev/null 2>&1 &
+```
+
+Then add `~/.local/share/applications/orpheus.desktop`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Orpheus
+GenericName=Music Player
+Comment=Local music player
+Exec=/home/YOUR_USER/.local/bin/orpheus
+Icon=orpheus
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;player;orpheus;local;
+```
+
+Install the guitar icon under the freedesktop icon theme so launchers can find
+it by name:
+
+```bash
+mkdir -p ~/.local/share/icons/hicolor/scalable/apps
+cp public/assets/images/orpheus-guitar.svg \
+  ~/.local/share/icons/hicolor/scalable/apps/orpheus.svg
+update-desktop-database ~/.local/share/applications
+gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor
+```
+
+The entry now appears in fuzzel and other application launchers as **Orpheus**.
+Search for it, press `Enter`, and the wrapper handles the rest. If you change the
+port, update both `URL` in the wrapper and the `.desktop` file if it embeds one.
 
 ## Adding songs
 
@@ -237,6 +298,23 @@ independently while the player stage stays fixed.
 - Use the back button (`<`) next to the queue title to return to the previous
   queue. Orpheus remembers the last 25 queues.
 
+The queue has two tabs:
+
+- **Up next** follows the collection you are browsing.
+- **User queue** is your own list. Right-click any song and choose **Add to
+  queue**, or use **Play next** to put it at the front. Drag the handle on the
+  left of a row to reorder it, or focus the handle and press `↑` / `↓`. Press
+  `Delete` or `Backspace` on a focused handle to remove a row. **Clear** empties
+  the user queue.
+
+Right-click anywhere on the player to open the current song's menu, or
+right-click a queue row or sidebar playlist to target that item instead. The menu
+lets you play it next, add it to the queue, like it, jump to its artist or album,
+copy its details, open it on other services, or reach **Player settings** while
+staying in fullscreen. The add-songs picker is searchable; with an empty search
+it lists every song, `Enter` adds the first match, and clicking a song toggles
+it.
+
 ### Liked Songs
 
 Open the sidebar and choose **Liked Songs** to see every song you have liked.
@@ -341,7 +419,9 @@ Search only covers the local library. YouTube is used only through the explicit
 
 Click the gear icon in the header to open settings. It contains the accent color
 picker, an **Album colors** toggle, a **Moving background** toggle, a **Fetch
-album covers** action, and a keyboard shortcut reference.
+album covers** action, the **Lyrics appearance** controls, and a keyboard
+shortcut reference. In fullscreen you can still open settings from the right-click
+song menu.
 
 **Album colors** is on by default. It samples the most prominent color from the
 current cover art and uses it for the accent and a soft background tint — even
@@ -358,6 +438,35 @@ reports how many covers were downloaded, matched to an existing album, already
 cached, or not found. It reloads the page after new artwork arrives. See
 [Playlist folders and covers](#playlist-folders-and-covers) for details.
 
+### Lyrics
+
+Press `F` to enter fullscreen. Orpheus loads time-synced lyrics from
+[LRCLIB](https://lrclib.net/) for the current song and follows playback
+automatically. Click a lyric line to seek to that point. The fullscreen view
+hides the header and queue so the artwork and lyrics get the whole window.
+
+Lyrics are not scraped from Google or Genius; Orpheus only calls lyric APIs. If
+LRCLIB has no match, times out, or cannot be reached, Orpheus retries the lookup
+with **Lyrics.ovh** and shows the plain-text result with an **Unsynced lyrics**
+note. If neither service has the song, the panel stays empty instead of showing
+unrelated text.
+
+The lyric lookups are proxied through the local server and cached for a few
+hours. Set `ORPHEUS_LYRICS_URL` or `ORPHEUS_LYRICS_FALLBACK_URL` to use a mirror
+or a compatible service.
+
+Open **Lyrics appearance** in settings to change:
+
+- Font size, weight, style, line spacing, alignment, and uppercase/glow effects
+- One of 90+ local typefaces, grouped as sans serif, serif, display, handwriting,
+  and monospace (no runtime font downloads)
+- Text color, or **Dynamic color** to follow the accent and album color live
+- Panel width from 30% up to 100% of the player, background dimming, and a sync
+  offset for lyrics that run early or late
+
+All appearance settings are saved in the browser. `Esc` closes settings and
+panels first; press it again to leave fullscreen.
+
 ## Keyboard shortcuts
 
 Global shortcuts are ignored while typing in an input.
@@ -371,9 +480,12 @@ Global shortcuts are ignored while typing in an input.
 | `M` | Mute / unmute |
 | `S` | Toggle shuffle |
 | `R` | Cycle repeat: off → all → one |
+| `F` | Enter or leave fullscreen |
 | `/` | Focus the search bar |
 | `Shift` + `Enter` | Search YouTube (while the search bar is focused) |
-| `Esc` | Close the search, playlist menu, sidebar, or settings |
+| `↑` / `↓` on a queue handle | Move that song up or down in the user queue |
+| `Delete` / `Backspace` on a queue handle | Remove that song from the user queue |
+| `Esc` | Close settings, menus, the search, or the sidebar; then leave fullscreen |
 
 ## Saved browser data
 
@@ -381,7 +493,8 @@ Orpheus uses these `localStorage` keys:
 
 | Key | Contents |
 | --- | --- |
-| `orpheus:player-prefs` | Volume, mute, shuffle, repeat, accent color, album colors, and moving background |
+| `orpheus:player-prefs` | Volume, mute, shuffle, repeat, accent color, album colors, moving background, and lyrics appearance |
+| `orpheus:user-queue` | The songs in your user queue, in order |
 | `orpheus:playlists` | Playlist names and their track IDs |
 | `orpheus:liked` | Liked track IDs |
 
@@ -391,6 +504,7 @@ To reset everything, open the browser developer tools console and run:
 localStorage.removeItem('orpheus:player-prefs');
 localStorage.removeItem('orpheus:playlists');
 localStorage.removeItem('orpheus:liked');
+localStorage.removeItem('orpheus:user-queue');
 ```
 
 Then reload the page.

@@ -53,6 +53,25 @@ const DOWNLOADER_ARTIST_HINT =
 const MUSICBRAINZ_RETRY_LIMIT = 3;
 const COVER_ART_RETRY_LIMIT = 2;
 const RETRY_BASE_MS = 1500;
+const LYRICS_URL = (process.env.ORPHEUS_LYRICS_URL || 'https://lrclib.net').replace(/\/$/, '');
+const LYRICS_FALLBACK_URL = (
+  process.env.ORPHEUS_LYRICS_FALLBACK_URL || 'https://api.lyrics.ovh'
+).replace(/\/$/, '');
+const LYRICS_FALLBACK_SOURCE = (() => {
+  try {
+    return new URL(LYRICS_FALLBACK_URL).hostname.replace(/^api\./, '') || 'backup service';
+  } catch {
+    return 'backup service';
+  }
+})();
+const LYRICS_TIMEOUT_MS = 6000;
+const LYRICS_BUDGET_MS = 9000;
+const LYRICS_FALLBACK_TIMEOUT_MS = 7000;
+const LYRICS_CACHE_LIMIT = 300;
+const LYRICS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const LYRICS_MISS_TTL_MS = 5 * 60 * 1000;
+const LYRICS_MAX_LINES = 2000;
+const LYRICS_MIN_INTERVAL_MS = 200;
 
 let metadataModulePromise = null;
 let artworkCache = new Map();
@@ -60,6 +79,8 @@ let coverManifest = null;
 let coverManifestPromise = null;
 let lastMusicBrainzRequestAt = 0;
 let musicBrainzCooldownUntil = 0;
+let lyricsCache = new Map();
+let lastLyricsRequestAt = 0;
 // Shared progress for the long-running cover fetch so the settings panel can
 // show that work is still happening instead of looking stuck.
 let coverFetchJob = null;
@@ -537,17 +558,501 @@ function luceneEscape(value) {
   return String(value ?? '').replace(/[\\"]/g, '\\$&');
 }
 
+// Downloader sites bake their name into the title tag, e.g.
+// "Money Trees (Feat. Jay Rock) - SongsLover.com". Those words are not part of
+// the song title, so leaving them in makes exact lyric searches return nothing.
+const DOWNLOAD_SITE =
+  '(?:songs?lover|pagalworld|mr-?jatt|djmaza|downloadming|minglebox|wapking|naasongs|sensongs|kuttyweb|isaimini|masstamilan|starmusiq|songspk|beemp3|emp3world|mp3juices|zippyshare|mp3download|320kbps)';
+const DOWNLOAD_SITE_DOMAIN = `(?:www\\.)?${DOWNLOAD_SITE}(?:\\.[a-z0-9-]+)+`;
+
+function stripDownloadSite(title) {
+  let text = String(title ?? '');
+  // "(SongsLover.com)", "[www.pagalworld.co.uk]", " - (SongsLover.com)", ...
+  text = text.replace(
+    new RegExp(`\\s*[([{]\\s*${DOWNLOAD_SITE_DOMAIN}\\s*[)\\]}]`, 'gi'),
+    ' ',
+  );
+  text = text.replace(
+    new RegExp(`\\s*[-–—]\\s*\\(?\\s*${DOWNLOAD_SITE_DOMAIN}\\s*\\)?\\s*$`, 'gi'),
+    '',
+  );
+  text = text.replace(new RegExp(`\\s*\\(?\\s*${DOWNLOAD_SITE_DOMAIN}\\s*\\)?\\s*$`, 'gi'), '');
+  // Generic " - SomeSite.com" suffix, but only after a dash or in brackets so
+  // real titles such as "Mr. Brightside" are left alone.
+  text = text.replace(/\s*[-–—]\s*\(?\s*(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+\s*\)?\s*$/i, '');
+  text = text.replace(/\s*[([{]\s*(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+\.[a-z]{2,}\s*[)\]}]/gi, ' ');
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s\-–—:|]+|[\s\-–—:|]+$/g, '')
+    .trim();
+}
+
+function stripFeatDecorations(title) {
+  return String(title ?? '')
+    .replace(/\s*[([{]\s*(?:feat\.?|ft\.?|featuring|with)\s+[^)\]}]+[)\]}]\s*/gi, ' ')
+    .replace(/\s*[-–—]?\s*(?:feat\.?|ft\.?|featuring)\s+.+$/i, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Downloader tags often keep "feat. ..." in the title even though MusicBrainz
 // stores the base title. Try the exact title first, then the cleaned one.
 function titleVariants(title) {
   const raw = String(title ?? '').trim();
   if (!raw) return [];
-  const cleaned = raw
-    .replace(/\s*[([{]\s*(?:feat\.?|ft\.?|featuring)\s+[^)\]}]+[)\]}]\s*/gi, ' ')
-    .replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.+$/i, ' ')
+  const cleaned = stripDownloadSite(raw);
+  const withoutFeat = stripFeatDecorations(cleaned);
+  return [...new Set([raw, cleaned, withoutFeat].filter(Boolean))];
+}
+
+function cleanAlbumName(album) {
+  const cleaned = stripDownloadSite(album);
+  const withoutEdition = cleaned
+    .replace(
+      /\s*[([{][^)\]}]*\b(?:deluxe|target|exclusive|edition|version|remaster(?:ed)?|explicit|bonus)\b[^)\]}]*[)\]}]/gi,
+      ' ',
+    )
     .replace(/\s+/g, ' ')
     .trim();
-  return [...new Set([raw, cleaned].filter(Boolean))];
+  return withoutEdition || cleaned;
+}
+
+// Titles that will be tried against lyric services, most specific first.
+// Leading artist names ("Jack Harlow - Lovin On Me") and marketing suffixes
+// ("(Bonus Track)", "(Single Version)") are removed after the exact forms.
+function lyricTitleVariants(track) {
+  const raw = String(track?.title ?? '').trim();
+  if (!raw) return [];
+  const clean = stripDownloadSite(raw);
+  const covers = [];
+
+  const artist = primaryArtist(track);
+  if (artist && clean.toLowerCase().startsWith(`${artist.toLowerCase()} - `)) {
+    covers.push(clean.slice(artist.length + 3).trim());
+  }
+
+  covers.push(clean);
+
+  // "Im Good - Blue REAPER Remix - David Guetta, Bebe Rexha" is really just
+  // "Im Good" with a remix name and credits appended. Add the base title as a
+  // search variant when the tail looks like remix/artist metadata.
+  const dashParts = clean.split(/\s+[-–—]\s+/);
+  const dashTail = dashParts.slice(1).join(' ');
+  if (
+    dashParts.length > 2 ||
+    (dashParts.length === 2 &&
+      /(?:remix|version|edit|remaster|mix|feat\.?|ft\.?)/i.test(dashTail))
+  ) {
+    covers.push(dashParts[0].trim());
+  }
+
+  const withoutFeat = stripFeatDecorations(clean);
+  covers.push(withoutFeat);
+  const withoutEdition = withoutFeat
+    .replace(
+      /\s*[([{]\s*(?:bonus(?: track)?|explicit|clean|deluxe(?: edition| version)?|remaster(?:ed)?(?: \d{4})?|album version|single version|radio edit|from [^)\]}]+)\s*[)\]}]/gi,
+      ' ',
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
+  covers.push(withoutEdition);
+
+  return [...new Set(covers.filter(Boolean))];
+}
+
+// A combined artist tag such as "Future & Metro Boomin" does not always match
+// the lyric database's artist field, so try individual names before combined
+// tags. "¥$, Kanye West, ..." therefore searches for "Kanye West" early.
+function lyricArtistVariants(track) {
+  const primary = primaryArtist(track);
+  const arrayArtists = Array.isArray(track?.artists) ? track.artists : [];
+  const rawArtists = [primary, ...arrayArtists, track?.artist, track?.albumArtist].filter(
+    Boolean,
+  );
+  const ordered = [];
+
+  if (primary) {
+    const parts = artistVariants(primary).filter((variant) => variant !== primary);
+    if (parts.length) ordered.push(...parts);
+    else ordered.push(primary);
+  }
+
+  arrayArtists.forEach((artist) => {
+    if (artist === primary) return;
+    artistVariants(artist).forEach((variant) => ordered.push(variant));
+  });
+  rawArtists.forEach((artist) => {
+    artistVariants(artist).forEach((variant) => {
+      if (variant !== artist) ordered.push(variant);
+    });
+  });
+  rawArtists.forEach((artist) => ordered.push(artist));
+
+  return [...new Set(ordered.filter(Boolean))].slice(0, 6);
+}
+
+// Lyrics come from LRCLIB, an open lyrics API with time-stamped (LRC) text.
+// The server does the lookup so the browser never has to talk to a third party
+// directly and so results can be cached between fullscreen visits.
+function parseSyncedLyrics(text) {
+  const timestamp = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+  const lines = [];
+
+  String(text ?? '')
+    .split(/\r?\n/)
+    .forEach((raw) => {
+      const textPart = raw.replace(timestamp, '').trim();
+      if (!textPart) return;
+
+      const stamps = [];
+      timestamp.lastIndex = 0;
+      let match;
+      while ((match = timestamp.exec(raw))) {
+        const minutes = Number(match[1]);
+        const seconds = Number(match[2]);
+        const fraction = match[3] ? Number(`0.${match[3]}`) : 0;
+        if (Number.isFinite(minutes) && Number.isFinite(seconds)) {
+          stamps.push(minutes * 60 + seconds + fraction);
+        }
+      }
+
+      stamps.forEach((time) => {
+        lines.push({ time: Math.round(time * 100) / 100, text: textPart });
+      });
+    });
+
+  lines.sort((left, right) => left.time - right.time);
+  return lines.slice(0, LYRICS_MAX_LINES);
+}
+
+function plainLyricsLines(text) {
+  return String(text ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, LYRICS_MAX_LINES)
+    .map((text) => ({ time: null, text }));
+}
+
+function normalizeLyricsResult(value, track) {
+  const source = value?.source ?? 'LRCLIB';
+  if (!value || value.instrumental) {
+    return {
+      found: Boolean(value),
+      instrumental: Boolean(value?.instrumental),
+      synced: false,
+      lines: [],
+      source,
+      trackName: value?.trackName ?? track.title,
+      artistName: value?.artistName ?? primaryArtist(track),
+      albumName: value?.albumName ?? null,
+      duration: value?.duration ?? null,
+      message: value?.instrumental ? 'This track is instrumental.' : 'No lyrics found for this song.',
+    };
+  }
+
+  const synced = parseSyncedLyrics(value.syncedLyrics);
+  const lines = synced.length ? synced : plainLyricsLines(value.plainLyrics);
+  if (!lines.length) {
+    return {
+      found: false,
+      instrumental: false,
+      synced: false,
+      lines: [],
+      source,
+      trackName: value.trackName ?? track.title,
+      artistName: value.artistName ?? primaryArtist(track),
+      albumName: value.albumName ?? null,
+      duration: value.duration ?? null,
+      message: 'No lyrics found for this song.',
+    };
+  }
+
+  return {
+    found: true,
+    instrumental: false,
+    synced: synced.length > 0,
+    lines,
+    source,
+    trackName: value.trackName ?? track.title,
+    artistName: value.artistName ?? primaryArtist(track),
+    albumName: value.albumName ?? null,
+    duration: value.duration ?? null,
+  };
+}
+
+async function waitForLyricsSlot() {
+  const delay = lastLyricsRequestAt + LYRICS_MIN_INTERVAL_MS - Date.now();
+  if (delay > 0) await wait(delay);
+  lastLyricsRequestAt = Date.now();
+}
+
+async function requestLyricsJson(pathname, { timeoutMs = LYRICS_TIMEOUT_MS, retry = true } = {}) {
+  await waitForLyricsSlot();
+  const response = await fetch(`${LYRICS_URL}${pathname}`, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': USER_AGENT,
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (response.status === 404) return null;
+
+  // LRCLIB rate-limits bursts. Honor a short Retry-After, but do not stall the
+  // whole panel when the service asks for a long cooldown.
+  if ((response.status === 429 || response.status === 503) && retry) {
+    const delay = Math.min(retryAfterMs(response) ?? 1200, 2000);
+    if (delay < timeoutMs - 750) {
+      await wait(delay);
+      return requestLyricsJson(pathname, { timeoutMs: timeoutMs - delay, retry: false });
+    }
+  }
+
+  if (!response.ok) throw new Error(`Lyrics service returned ${response.status}`);
+  return response.json();
+}
+
+function lyricsGetPath(track, { withAlbum = true, title, artist } = {}) {
+  const params = new URLSearchParams();
+  params.set('track_name', title ?? lyricTitleVariants(track)[0] ?? track.title);
+  params.set('artist_name', artist ?? primaryArtist(track));
+
+  if (withAlbum && track.albumTag && !track.albumIsPlaylistTag) {
+    const album = cleanAlbumName(track.albumTag);
+    if (album) params.set('album_name', album);
+  }
+  if (withAlbum && Number.isFinite(track.duration) && track.duration > 0) {
+    params.set('duration', String(Math.round(track.duration)));
+  }
+
+  return `/api/get?${params.toString()}`;
+}
+
+// Lyrics databases are inconsistent about punctuation and accents ("I'm Good"
+// vs "Im Good"), so compare without either of them.
+function normalizeLyricText(value) {
+  return normalizeText(value)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/['’`]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Score a search hit against every title/artist variant we know. A candidate
+// must match at least part of the title; a different song by the same artist
+// is never an acceptable answer.
+function scoreLyricsCandidate(item, { titles, artists, duration }) {
+  if (!item || (!item.syncedLyrics && !item.plainLyrics && !item.instrumental)) {
+    return { score: -1, titleScore: 0 };
+  }
+
+  const itemTitle = normalizeLyricText(item.trackName);
+  const itemArtist = normalizeLyricText(item.artistName);
+  let titleScore = 0;
+  let artistScore = 0;
+
+  if (titles.some((title) => itemTitle === title)) titleScore = 5;
+  else if (titles.some((title) => itemTitle.includes(title) || title.includes(itemTitle))) {
+    titleScore = 2;
+  }
+
+  if (artists.some((artist) => itemArtist === artist)) artistScore = 4;
+  else if (artists.some((artist) => itemArtist.includes(artist) || artist.includes(itemArtist))) {
+    artistScore = 1;
+  }
+
+  let score = titleScore + artistScore;
+  if (item.syncedLyrics) score += 2;
+  if (Number.isFinite(duration) && Number.isFinite(item.duration)) {
+    const difference = Math.abs(item.duration - duration);
+    if (difference <= 2) score += 2;
+    else if (difference <= 10) score += 1;
+  }
+
+  return { score, titleScore };
+}
+
+async function searchLyrics(track, request = requestLyricsJson) {
+  const titleQueries = lyricTitleVariants(track);
+  const artistQueries = lyricArtistVariants(track);
+  const titles = titleQueries.map(normalizeLyricText).filter(Boolean);
+  const artists = artistQueries.map(normalizeLyricText).filter(Boolean);
+  const duration = Number.isFinite(track.duration) ? track.duration : null;
+
+  let best = null;
+  let bestScore = -1;
+  let bestTitleScore = 0;
+  let attempts = 0;
+
+  // Bound the number of requests: two title forms x two artist forms is enough
+  // to deal with "feat." decorations without turning one song into a burst.
+  outer: for (const title of titleQueries.slice(0, 2)) {
+    for (const artist of artistQueries.slice(0, 2)) {
+      if (attempts >= 4) break outer;
+      attempts += 1;
+
+      const params = new URLSearchParams();
+      params.set('track_name', title);
+      params.set('artist_name', artist);
+      const results = await request(`/api/search?${params.toString()}`);
+      if (!Array.isArray(results)) continue;
+
+      results.forEach((item) => {
+        const { score, titleScore } = scoreLyricsCandidate(item, {
+          titles,
+          artists,
+          duration,
+        });
+        if (titleScore > 0 && score > bestScore) {
+          best = item;
+          bestScore = score;
+          bestTitleScore = titleScore;
+        }
+      });
+
+      // Exact title + artist + synced lyrics (+ duration) is a safe stop.
+      if (bestTitleScore === 5 && bestScore >= 11) break outer;
+    }
+  }
+
+  return best;
+}
+
+function fallbackLyricsPaths(track) {
+  const titles = lyricTitleVariants(track).slice(0, 2);
+  const artists = lyricArtistVariants(track).slice(0, 2);
+  const paths = [];
+
+  for (const artist of artists) {
+    for (const title of titles) {
+      paths.push(`/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`);
+    }
+  }
+  return paths.slice(0, 4);
+}
+
+// LRCLIB has time-stamped lyrics, but it does not have every song. When it
+// misses or cannot be reached, try Lyrics.ovh for plain text. The track title
+// and artist are varied slightly so featured-artist decorations do not stop the
+// backup lookup.
+async function requestFallbackLyrics(track) {
+  const deadline = Date.now() + LYRICS_FALLBACK_TIMEOUT_MS;
+  let hadError = false;
+
+  for (const path of fallbackLyricsPaths(track)) {
+    const remaining = deadline - Date.now();
+    if (remaining < 500) break;
+
+    try {
+      const response = await fetch(`${LYRICS_FALLBACK_URL}${path}`, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': USER_AGENT,
+        },
+        signal: AbortSignal.timeout(Math.min(remaining, LYRICS_FALLBACK_TIMEOUT_MS)),
+      });
+
+      if (response.status === 404) continue;
+      if (!response.ok) {
+        hadError = true;
+        continue;
+      }
+
+      const data = await response.json();
+      const text = typeof data?.lyrics === 'string' ? data.lyrics.trim() : '';
+      if (!text) continue;
+
+      return {
+        trackName: track.title,
+        artistName: primaryArtist(track),
+        albumName: track.albumTag || null,
+        duration: Number.isFinite(track.duration) ? track.duration : null,
+        plainLyrics: text,
+        source: LYRICS_FALLBACK_SOURCE,
+      };
+    } catch {
+      hadError = true;
+    }
+  }
+
+  if (hadError) throw new Error('The backup lyrics service is unavailable.');
+  return null;
+}
+
+function lyricsCacheKey(track) {
+  // Include the metadata that the lookup depends on so editing a tag does not
+  // keep serving a cached miss from the old title/artist/album.
+  return [track.id, track.title, track.artist, track.albumTag, track.duration].join('\u0000');
+}
+
+async function lookupLyrics(track) {
+  const cacheKey = lyricsCacheKey(track);
+  const cached = lyricsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const deadline = Date.now() + LYRICS_BUDGET_MS;
+  const requestWithinBudget = (pathname) => {
+    const remaining = deadline - Date.now();
+    if (remaining < 400) throw new Error('Lyrics lookup timed out.');
+    return requestLyricsJson(pathname, { timeoutMs: Math.min(LYRICS_TIMEOUT_MS, remaining) });
+  };
+
+  const titles = lyricTitleVariants(track);
+  const artists = lyricArtistVariants(track);
+  const getPaths = [];
+  const addGetPath = (title, artist, withAlbum) => {
+    const path = lyricsGetPath(track, { withAlbum, title, artist });
+    if (!getPaths.includes(path)) getPaths.push(path);
+  };
+
+  addGetPath(titles[0], artists[0], true);
+  addGetPath(titles[0], artists[0], false);
+  if (titles[1]) addGetPath(titles[1], artists[0], false);
+  if (artists[1]) addGetPath(titles[0], artists[1], false);
+
+  let value = null;
+  try {
+    let result = null;
+    for (const path of getPaths.slice(0, 4)) {
+      result = await requestWithinBudget(path);
+      if (result) break;
+    }
+    if (!result) result = await searchLyrics(track, requestWithinBudget);
+    value = result
+      ? normalizeLyricsResult(result, track)
+      : normalizeLyricsResult(null, track);
+  } catch {
+    value = {
+      found: false,
+      instrumental: false,
+      synced: false,
+      lines: [],
+      source: 'LRCLIB',
+      message: 'The lyrics service is unavailable right now.',
+      error: true,
+    };
+  }
+
+  if (!value?.found && !value?.instrumental) {
+    try {
+      const fallback = await requestFallbackLyrics(track);
+      if (fallback) value = normalizeLyricsResult(fallback, track);
+    } catch {
+      // Keep the LRCLIB result or error; it already explains what happened.
+    }
+  }
+
+  lyricsCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + (value.found || value.instrumental ? LYRICS_CACHE_TTL_MS : LYRICS_MISS_TTL_MS),
+  });
+  if (lyricsCache.size > LYRICS_CACHE_LIMIT) {
+    lyricsCache.delete(lyricsCache.keys().next().value);
+  }
+  return value;
 }
 
 // A combined artist tag such as "Future & Metro Boomin" does not always match
@@ -1195,6 +1700,26 @@ export function createLocalMusicPlugin() {
         error: library.error,
         message: library.message,
       });
+      return true;
+    }
+
+    if (pathname.startsWith('/api/lyrics/')) {
+      let id;
+      try {
+        id = decodeURIComponent(pathname.slice('/api/lyrics/'.length));
+      } catch {
+        sendError(res, 400, 'Invalid track id.');
+        return true;
+      }
+
+      const library = await ensureLibrary();
+      const track = library.tracks.find((item) => item.id === id);
+      if (!track) {
+        sendError(res, 404, 'Track not found.');
+        return true;
+      }
+
+      sendJson(res, 200, await lookupLyrics(track));
       return true;
     }
 

@@ -1,6 +1,10 @@
 import { splitArtistNames } from '../utils/artistNames.js';
+import { LYRICS_FONT_IDS } from '../data/lyricsFonts.js';
 
 const REPEAT_MODES = ['off', 'all', 'one'];
+const LYRICS_ALIGNMENTS = ['left', 'center', 'right'];
+const LYRICS_STYLES = ['normal', 'italic'];
+const LYRICS_WEIGHTS = [300, 400, 500, 600, 700, 800];
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 const DEFAULT_PREFS = {
   volume: 0.8,
@@ -10,7 +14,27 @@ const DEFAULT_PREFS = {
   accent: '#b49cff',
   movingBackground: true,
   dynamicColor: true,
+  // Lyrics are only visible in the fullscreen view, but the appearance is
+  // stored with the other player preferences so it survives reloads.
+  lyricsFontSize: 34,
+  lyricsColor: '#f2f2f4',
+  // When enabled, lyrics inherit --accent so they follow accent and album
+  // color changes instead of needing a manual color update.
+  lyricsFollowAccent: false,
+  lyricsAlignment: 'center',
+  lyricsWeight: 600,
+  lyricsStyle: 'normal',
+  lyricsFont: 'sans',
+  lyricsWidth: 46,
+  lyricsLineHeight: 1.65,
+  lyricsOffset: 0,
+  lyricsBackground: 0.32,
+  lyricsDim: true,
+  lyricsGlow: false,
+  lyricsUppercase: false,
 };
+const PREF_KEYS = Object.keys(DEFAULT_PREFS);
+const PREF_STORAGE_KEYS = [...PREF_KEYS];
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -29,15 +53,24 @@ function isUsableAccent(value) {
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue >= 100;
 }
 
+function numberInRange(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return clamp(number, min, max);
+}
+
+function oneOf(value, allowed, fallback) {
+  return allowed.includes(value) ? value : fallback;
+}
+
 function readPrefs(storageKey) {
   try {
     const stored = JSON.parse(window.localStorage.getItem(storageKey) ?? '{}');
-    const volume = Number(stored.volume);
     return {
-      volume: Number.isFinite(volume) ? clamp(volume, 0, 1) : DEFAULT_PREFS.volume,
+      volume: numberInRange(stored.volume, 0, 1, DEFAULT_PREFS.volume),
       muted: typeof stored.muted === 'boolean' ? stored.muted : DEFAULT_PREFS.muted,
       shuffle: typeof stored.shuffle === 'boolean' ? stored.shuffle : DEFAULT_PREFS.shuffle,
-      repeat: REPEAT_MODES.includes(stored.repeat) ? stored.repeat : DEFAULT_PREFS.repeat,
+      repeat: oneOf(stored.repeat, REPEAT_MODES, DEFAULT_PREFS.repeat),
       accent: isUsableAccent(stored.accent) ? stored.accent.toLowerCase() : DEFAULT_PREFS.accent,
       movingBackground:
         typeof stored.movingBackground === 'boolean'
@@ -45,9 +78,73 @@ function readPrefs(storageKey) {
           : DEFAULT_PREFS.movingBackground,
       dynamicColor:
         typeof stored.dynamicColor === 'boolean' ? stored.dynamicColor : DEFAULT_PREFS.dynamicColor,
+      lyricsFontSize: numberInRange(
+        stored.lyricsFontSize,
+        18,
+        72,
+        DEFAULT_PREFS.lyricsFontSize,
+      ),
+      lyricsColor: isHexColor(stored.lyricsColor)
+        ? stored.lyricsColor.toLowerCase()
+        : DEFAULT_PREFS.lyricsColor,
+      lyricsFollowAccent:
+        typeof stored.lyricsFollowAccent === 'boolean'
+          ? stored.lyricsFollowAccent
+          : DEFAULT_PREFS.lyricsFollowAccent,
+      lyricsAlignment: oneOf(stored.lyricsAlignment, LYRICS_ALIGNMENTS, DEFAULT_PREFS.lyricsAlignment),
+      lyricsWeight: Number.isFinite(Number(stored.lyricsWeight))
+        ? oneOf(Number(stored.lyricsWeight), LYRICS_WEIGHTS, DEFAULT_PREFS.lyricsWeight)
+        : DEFAULT_PREFS.lyricsWeight,
+      lyricsStyle: oneOf(stored.lyricsStyle, LYRICS_STYLES, DEFAULT_PREFS.lyricsStyle),
+      lyricsFont: oneOf(stored.lyricsFont, LYRICS_FONT_IDS, DEFAULT_PREFS.lyricsFont),
+      lyricsWidth: numberInRange(stored.lyricsWidth, 30, 100, DEFAULT_PREFS.lyricsWidth),
+      lyricsLineHeight: numberInRange(
+        stored.lyricsLineHeight,
+        1.1,
+        2.6,
+        DEFAULT_PREFS.lyricsLineHeight,
+      ),
+      lyricsOffset: numberInRange(stored.lyricsOffset, -5, 5, DEFAULT_PREFS.lyricsOffset),
+      lyricsBackground: numberInRange(
+        stored.lyricsBackground,
+        0,
+        0.9,
+        DEFAULT_PREFS.lyricsBackground,
+      ),
+      lyricsDim:
+        typeof stored.lyricsDim === 'boolean' ? stored.lyricsDim : DEFAULT_PREFS.lyricsDim,
+      lyricsGlow:
+        typeof stored.lyricsGlow === 'boolean' ? stored.lyricsGlow : DEFAULT_PREFS.lyricsGlow,
+      lyricsUppercase:
+        typeof stored.lyricsUppercase === 'boolean'
+          ? stored.lyricsUppercase
+          : DEFAULT_PREFS.lyricsUppercase,
     };
   } catch {
     return { ...DEFAULT_PREFS };
+  }
+}
+
+function readUserQueue(storageKey) {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(storageKey) ?? '[]');
+    if (!Array.isArray(stored)) return [];
+
+    return stored
+      .map((entry, index) => {
+        // Accept the simpler `["track-id"]` shape too.
+        if (typeof entry === 'string') {
+          return { uid: `legacy-${index}-${entry}`, trackId: entry };
+        }
+        if (!entry || typeof entry.trackId !== 'string') return null;
+        return {
+          uid: typeof entry.uid === 'string' && entry.uid ? entry.uid : `legacy-${index}-${entry.trackId}`,
+          trackId: entry.trackId,
+        };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
   }
 }
 
@@ -170,12 +267,61 @@ function descriptorOf(collection) {
   };
 }
 
+function sanitizeLyricsPreference(key, value) {
+  switch (key) {
+    case 'lyricsFontSize': {
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 18 && number <= 72 ? number : undefined;
+    }
+    case 'lyricsColor':
+      return isHexColor(value) ? value.toLowerCase() : undefined;
+    case 'lyricsAlignment':
+      return LYRICS_ALIGNMENTS.includes(value) ? value : undefined;
+    case 'lyricsWeight': {
+      const number = Number(value);
+      return LYRICS_WEIGHTS.includes(number) ? number : undefined;
+    }
+    case 'lyricsStyle':
+      return LYRICS_STYLES.includes(value) ? value : undefined;
+    case 'lyricsFont':
+      return LYRICS_FONT_IDS.includes(value) ? value : undefined;
+    case 'lyricsWidth': {
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 30 && number <= 100 ? number : undefined;
+    }
+    case 'lyricsLineHeight': {
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 1.1 && number <= 2.6 ? number : undefined;
+    }
+    case 'lyricsOffset': {
+      const number = Number(value);
+      return Number.isFinite(number) && number >= -5 && number <= 5 ? number : undefined;
+    }
+    case 'lyricsBackground': {
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 && number <= 0.9 ? number : undefined;
+    }
+    case 'lyricsDim':
+    case 'lyricsGlow':
+    case 'lyricsUppercase':
+    case 'lyricsFollowAccent':
+      return typeof value === 'boolean' ? value : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function createQueueUid() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
 export function createPlayerStore(
   initialTracks = [],
   {
     storageKey = 'orpheus:player-prefs',
     playlistsKey = 'orpheus:playlists',
     likedKey = 'orpheus:liked',
+    queueKey = 'orpheus:user-queue',
     folderPlaylists = [],
     libraryRoot = null,
     libraryError = null,
@@ -196,6 +342,7 @@ export function createPlayerStore(
         .map((playlist) => ({ ...playlist, type: 'playlist', automatic: true }))
     : [];
   const { albums, artists } = buildCollections(library, automaticPlaylists);
+  const libraryIds = new Set(library.map((track) => track.id));
 
   let state = {
     // `tracks` / `currentIndex` are the playback queue. They only change when
@@ -204,6 +351,9 @@ export function createPlayerStore(
     // `displayedTracks` / `activeCollection` are what the queue panel shows.
     // Browsing (single clicks, back navigation) changes only these.
     displayedTracks: [...library],
+    // A separate, editable queue. Tracks added here are played before the
+    // normal playback queue continues (like YouTube's "Add to queue").
+    userQueue: readUserQueue(queueKey).filter((entry) => libraryIds.has(entry.trackId)),
     library,
     libraryRoot,
     libraryError,
@@ -241,13 +391,21 @@ export function createPlayerStore(
 
   function persistPrefs() {
     try {
-      const { volume, muted, shuffle, repeat, accent, movingBackground, dynamicColor } = state;
-      window.localStorage.setItem(
-        storageKey,
-        JSON.stringify({ volume, muted, shuffle, repeat, accent, movingBackground, dynamicColor }),
-      );
+      const stored = {};
+      PREF_STORAGE_KEYS.forEach((key) => {
+        stored[key] = state[key];
+      });
+      window.localStorage.setItem(storageKey, JSON.stringify(stored));
     } catch {
       // Storage can be unavailable (private mode, blocked cookies); playback still works.
+    }
+  }
+
+  function persistUserQueue() {
+    try {
+      window.localStorage.setItem(queueKey, JSON.stringify(state.userQueue));
+    } catch {
+      // Ignore storage failures; the queue still works for this session.
     }
   }
 
@@ -269,11 +427,7 @@ export function createPlayerStore(
 
   function setState(patch) {
     state = { ...state, ...patch };
-    if (
-      ['volume', 'muted', 'shuffle', 'repeat', 'accent', 'movingBackground', 'dynamicColor'].some(
-        (key) => key in patch,
-      )
-    ) {
+    if (PREF_KEYS.some((key) => key in patch)) {
       persistPrefs();
     }
     if ('playlists' in patch) {
@@ -282,8 +436,55 @@ export function createPlayerStore(
     if ('likedIds' in patch) {
       persistLiked();
     }
+    if ('userQueue' in patch) {
+      persistUserQueue();
+    }
     const snapshot = getState();
     listeners.forEach((listener) => listener(snapshot));
+  }
+
+  function queuedTrack(entry) {
+    if (!entry) return null;
+    return library.find((track) => track.id === entry.trackId) ?? null;
+  }
+
+  // Moves the first explicit queue entry into the playback queue and returns
+  // whether playback should move to it.
+  function advanceToUserQueue() {
+    while (state.userQueue.length) {
+      const [entry, ...rest] = state.userQueue;
+      const track = queuedTrack(entry);
+      if (!track) {
+        setState({ userQueue: rest });
+        continue;
+      }
+
+      if (!state.tracks.length) {
+        setState({
+          tracks: [track],
+          currentIndex: 0,
+          userQueue: rest,
+          currentTime: 0,
+          duration: 0,
+          error: null,
+        });
+        return true;
+      }
+
+      const tracks = [...state.tracks];
+      const index = Math.min(state.currentIndex + 1, tracks.length);
+      tracks.splice(index, 0, track);
+      setState({
+        tracks,
+        currentIndex: index,
+        userQueue: rest,
+        currentTime: 0,
+        duration: 0,
+        error: null,
+      });
+      return true;
+    }
+    return false;
   }
 
   function randomIndex() {
@@ -296,6 +497,9 @@ export function createPlayerStore(
   }
 
   function next({ automatic = false } = {}) {
+    // Explicitly queued songs always come next, even when shuffle is on.
+    if (state.userQueue.length && advanceToUserQueue()) return true;
+
     const { tracks, currentIndex, shuffle, repeat } = state;
     if (!tracks.length) return false;
 
@@ -558,6 +762,91 @@ export function createPlayerStore(
     return !hasTrack;
   }
 
+  function addToQueue(trackId, { next = false } = {}) {
+    if (typeof trackId !== 'string' || !libraryIds.has(trackId)) return null;
+    const entry = { uid: createQueueUid(), trackId };
+    const userQueue = next ? [entry, ...state.userQueue] : [...state.userQueue, entry];
+    setState({ userQueue });
+    return entry.uid;
+  }
+
+  function removeFromQueue(uid) {
+    const userQueue = state.userQueue.filter((entry) => entry.uid !== uid);
+    if (userQueue.length === state.userQueue.length) return false;
+    setState({ userQueue });
+    return true;
+  }
+
+  function clearUserQueue() {
+    if (!state.userQueue.length) return false;
+    setState({ userQueue: [] });
+    return true;
+  }
+
+  function moveQueueItem(uid, toIndex) {
+    const fromIndex = state.userQueue.findIndex((entry) => entry.uid === uid);
+    if (fromIndex === -1) return false;
+
+    const target = clamp(Math.trunc(Number(toIndex) || 0), 0, state.userQueue.length - 1);
+    if (target === fromIndex) return false;
+
+    const userQueue = [...state.userQueue];
+    const [entry] = userQueue.splice(fromIndex, 1);
+    userQueue.splice(target, 0, entry);
+    setState({ userQueue });
+    return true;
+  }
+
+  function moveQueueItemBy(uid, delta) {
+    const fromIndex = state.userQueue.findIndex((entry) => entry.uid === uid);
+    if (fromIndex === -1) return false;
+    return moveQueueItem(uid, fromIndex + delta);
+  }
+
+  // Playing a queued row consumes that entry and drops it directly after the
+  // current song so the rest of the current context is preserved.
+  function playFromQueue(uid) {
+    const entry = state.userQueue.find((item) => item.uid === uid);
+    const track = queuedTrack(entry);
+    if (!entry || !track) return false;
+
+    const userQueue = state.userQueue.filter((item) => item.uid !== uid);
+
+    if (!state.tracks.length) {
+      setState({
+        tracks: [track],
+        currentIndex: 0,
+        userQueue,
+        currentTime: 0,
+        duration: 0,
+        error: null,
+      });
+      return true;
+    }
+
+    const tracks = [...state.tracks];
+    const index = Math.min(state.currentIndex + 1, tracks.length);
+    tracks.splice(index, 0, track);
+    setState({
+      tracks,
+      currentIndex: index,
+      userQueue,
+      currentTime: 0,
+      duration: 0,
+      error: null,
+    });
+    return true;
+  }
+
+  // "Play all" turns the editable queue into the normal playback context.
+  function playUserQueue() {
+    const list = state.userQueue.map(queuedTrack).filter(Boolean);
+    if (!list.length) return false;
+    activateQueue(list, null, list[0].id);
+    setState({ userQueue: [] });
+    return true;
+  }
+
   return {
     getState,
     subscribe(listener) {
@@ -608,6 +897,51 @@ export function createPlayerStore(
     },
     toggleLike(trackId) {
       return toggleLike(trackId);
+    },
+    addToQueue(trackId, options) {
+      return addToQueue(trackId, options);
+    },
+    removeFromQueue(uid) {
+      return removeFromQueue(uid);
+    },
+    clearUserQueue() {
+      return clearUserQueue();
+    },
+    moveQueueItem(uid, toIndex) {
+      return moveQueueItem(uid, toIndex);
+    },
+    moveQueueItemBy(uid, delta) {
+      return moveQueueItemBy(uid, delta);
+    },
+    playFromQueue(uid) {
+      return playFromQueue(uid);
+    },
+    playUserQueue() {
+      return playUserQueue();
+    },
+    setLyricsPreference(key, value) {
+      const nextValue = sanitizeLyricsPreference(key, value);
+      if (nextValue === undefined) return false;
+      setState({ [key]: nextValue });
+      return true;
+    },
+    resetLyricsPreferences() {
+      setState({
+        lyricsFontSize: DEFAULT_PREFS.lyricsFontSize,
+        lyricsColor: DEFAULT_PREFS.lyricsColor,
+        lyricsFollowAccent: DEFAULT_PREFS.lyricsFollowAccent,
+        lyricsAlignment: DEFAULT_PREFS.lyricsAlignment,
+        lyricsWeight: DEFAULT_PREFS.lyricsWeight,
+        lyricsStyle: DEFAULT_PREFS.lyricsStyle,
+        lyricsFont: DEFAULT_PREFS.lyricsFont,
+        lyricsWidth: DEFAULT_PREFS.lyricsWidth,
+        lyricsLineHeight: DEFAULT_PREFS.lyricsLineHeight,
+        lyricsOffset: DEFAULT_PREFS.lyricsOffset,
+        lyricsBackground: DEFAULT_PREFS.lyricsBackground,
+        lyricsDim: DEFAULT_PREFS.lyricsDim,
+        lyricsGlow: DEFAULT_PREFS.lyricsGlow,
+        lyricsUppercase: DEFAULT_PREFS.lyricsUppercase,
+      });
     },
     createPlaylist(name, trackId = null) {
       const trimmed = String(name ?? '').trim().slice(0, 40);
